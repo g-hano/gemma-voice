@@ -54,6 +54,8 @@ class SpeechTrainConfig:
     dataset_audio_column: str = "audio"
     max_samples: int | None = 512
     val_fraction: float = 0.1
+    # Quality gate (text length, decodable audio, duration). Off by default for curated HF TTS sets.
+    filter_dataset: bool = False
     use_demo_dataset: bool = False
     cache_speech_tokens: bool = True
     cache_dir: str = "data/speech_token_cache"

@@ -210,15 +210,27 @@ def load_turkish_speech_dataset(config: SpeechTrainConfig) -> "Dataset":
         Audio(sampling_rate=config.mimi_sample_rate),
     )
 
-    ds = ds.filter(
-        _row_passes_filters,
-        fn_kwargs={"config": config},
-        desc="Filter Turkish speech rows",
-    )
+    if config.filter_dataset:
+        ds = ds.filter(
+            _row_passes_filters,
+            fn_kwargs={"config": config},
+            desc="Filter speech rows (text length, audio duration)",
+        )
 
     if config.max_samples is not None and len(ds) > 0:
         n = min(config.max_samples, len(ds))
         ds = ds.select(range(n))
+
+    if len(ds) == 0:
+        hint = (
+            " Enable filter_dataset: true only if you need to drop bad rows; "
+            "for curated sets leave it false."
+            if not config.filter_dataset
+            else " Try filter_dataset: false or check dataset_text_column / dataset_audio_column."
+        )
+        raise ValueError(
+            f"No samples loaded from {config.dataset_name!r} (split={config.dataset_split!r}).{hint}"
+        )
     return ds
 
 def train_val_split(

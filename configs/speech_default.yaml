@@ -30,6 +30,7 @@ dataset_text_column: text
 dataset_audio_column: audio
 max_samples: 512
 val_fraction: 0.1
+filter_dataset: false
 use_demo_dataset: false
 cache_speech_tokens: true
 cache_dir: data/speech_token_cache

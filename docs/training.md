@@ -51,7 +51,7 @@ Gemma 4 uses `AutoProcessor.apply_chat_template(..., enable_thinking=False)` for
 
 | Role | HF path | Config keys | Columns used | Loader filters |
 |------|---------|-------------|--------------|----------------|
-| **Speech head (default)** | [Anilosan15/Synthetic_Turkish_TTS_Data](https://huggingface.co/datasets/Anilosan15/Synthetic_Turkish_TTS_Data) | `dataset_split: train` | `text` → transcript, `audio` → waveform | CC BY 4.0; 13k clips; `min_text_chars` 4, `max_text_chars` 500, audio 0.5–30 s, resample 24 kHz |
+| **Speech head (default)** | [Anilosan15/Synthetic_Turkish_TTS_Data](https://huggingface.co/datasets/Anilosan15/Synthetic_Turkish_TTS_Data) | `dataset_split: train` | `text` → transcript, `audio` → waveform | CC BY 4.0; 13k clips; resample 24 kHz. Optional `filter_dataset: true` drops rows by text/audio length (not language). |
 | **Alternative** | [erenfazlioglu/turkishvoicedataset](https://huggingface.co/datasets/erenfazlioglu/turkishvoicedataset) | — | `transcription` → text, `audio` → waveform | Set `dataset_text_column: transcription` |
 | **Smoke / offline** | `--demo` | synthetic | `question`, `text`, `audio` | 4 Turkish QA pairs + noise WAV |
 | **Text SFT (phase A)** | `tascib/turkish-instruction`, etc. | — | — | See [setup.md](setup.md); not used by speech script |
