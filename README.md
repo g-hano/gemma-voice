@@ -1,41 +1,34 @@
-# Gemma Turkish — Gemma 4 E4B speech head (Turkish)
+# Gemma Turkish — Gemma 4 speech head (Turkish)
 
-Turkish-focused training stack for **[Gemma 4 E4B-it](https://huggingface.co/google/gemma-4-E4B-it)** with a **Frisson-style** frozen-backbone → **Mimi** speech-token head ([architecture blog](https://www.frisson-labs.com/gemma4-e4b-architecture)).
+Turkish-focused training stack for **[Gemma 4](https://huggingface.co/google/gemma-4-E2B-it)** with a **Frisson-style** frozen-backbone → **Mimi** speech-token head ([architecture blog](https://www.frisson-labs.com/gemma4-e4b-architecture)).
 
-## Quick start (Windows PowerShell)
+## Quick start
 
-```powershell
-cd C:\Users\Cihan\Desktop\gemma
-
-uv venv --python 3.12 .venv
-.\.venv\Scripts\Activate.ps1
-
-uv pip install -e ".[logging]"
-uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-```
-
-Verify GPU (RTX 3080):
-
-```powershell
-python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
-```
-
-Hugging Face (gated Gemma, if used):
-
-```powershell
-huggingface-cli login
-```
-
-## Speech-head training
-
-```powershell
-python scripts/train_speech.py --config configs/speech_default.yaml --validate-only
+```bash
+git clone https://github.com/g-hano/gemma.git
+cd gemma
+pip install -e .
 python scripts/train_speech.py --config configs/speech_default.yaml
 ```
 
-Smoke (no E4B download):
+Requires **Python 3.11+** and a CUDA-capable GPU for training. PyTorch is installed via `pyproject.toml` dependencies.
 
-```powershell
+Optional checks:
+
+```bash
+python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+huggingface-cli login   # if using a gated Gemma checkpoint
+```
+
+Validate config and data loading before a full run:
+
+```bash
+python scripts/train_speech.py --config configs/speech_default.yaml --validate-only
+```
+
+Smoke test (no backbone download):
+
+```bash
 python scripts/train_speech.py --demo --smoke
 ```
 
@@ -45,17 +38,20 @@ See **[docs/training.md](docs/training.md)** for dataset columns, VRAM notes, an
 
 | Item | Value |
 |------|--------|
-| Backbone | `google/gemma-4-E4B-it` |
+| Backbone | `google/gemma-4-E2B-it` |
 | Codec | `kyutai/mimi` (8 codebooks, 24 kHz) |
 | Dataset | `Anilosan15/Synthetic_Turkish_TTS_Data` (CC BY 4.0) |
-| Tap | Last **6** of **42** decoder layers |
-| Hidden | **2560** (E4B text decoder) |
+| Tap | Last **6** decoder layers |
+| Hidden | **2560** |
+
+Override the backbone in config or on the CLI, e.g. `google/gemma-4-E4B-it` for the full E4B model.
 
 ## RTX 3080 (12 GB)
 
-- Use **bf16**, **batch size 1**, **gradient_checkpointing: true**
-- E4B + Mimi is **tight** on 12 GB; reduce `max_audio_seconds` or use a larger GPU if OOM
-- Install **CUDA 12.4** PyTorch wheels (`cu124`) as above
+- Use **bf16**, **batch size 1**, **gradient_checkpointing: true** (defaults in `configs/speech_default.yaml`)
+- E2B + Mimi fits more comfortably than E4B; reduce `max_audio_seconds` or use a larger GPU if OOM
+- For CUDA 12.4 wheels on Windows, you may reinstall PyTorch explicitly:
+  `pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124`
 
 ## Documentation
 
@@ -64,6 +60,7 @@ See **[docs/training.md](docs/training.md)** for dataset columns, VRAM notes, an
 
 ## References
 
+- [google/gemma-4-E2B-it](https://huggingface.co/google/gemma-4-E2B-it)
 - [google/gemma-4-E4B-it](https://huggingface.co/google/gemma-4-E4B-it)
 - [Frisson Labs — Grafting a Speech Head onto Gemma 4 E4B](https://www.frisson-labs.com/gemma4-e4b-architecture)
 - [gemma4-audio](https://github.com/frisson-labs/gemma4-audio)
