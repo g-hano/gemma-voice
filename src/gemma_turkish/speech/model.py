@@ -151,12 +151,34 @@ def _load_gemma_backbone(model_id: str, dtype: torch.dtype, gradient_checkpointi
     return tokenizer, gemma, False
 
 
-def _tensor_to_list(value: Any) -> list[int]:
-    if hasattr(value, "dim") and value.dim() == 2:
-        value = value[0]
-    if hasattr(value, "tolist"):
-        return value.tolist()
-    return list(value)
+def _flatten_token_list(value: Any) -> list[int]:
+    """Processor/tokenizer output → 1D ``list[int]`` (drops a leading batch dim if present)."""
+    while True:
+        if value is None:
+            return []
+        if hasattr(value, "dim"):
+            if value.dim() == 0:
+                return [int(value.item())]
+            if value.dim() >= 2:
+                value = value[0]
+                continue
+            return [int(x) for x in value.tolist()]
+        if isinstance(value, (list, tuple)):
+            if not value:
+                return []
+            if isinstance(value[0], (list, tuple)):
+                value = value[0]
+                continue
+            return [int(x) for x in value]
+        return [int(value)]
+
+
+def _ensure_batched_2d(t: torch.Tensor, name: str) -> torch.Tensor:
+    if t.dim() == 1:
+        return t.unsqueeze(0)
+    if t.dim() != 2:
+        raise ValueError(f"`{name}` must be 1D or 2D, got shape {tuple(t.shape)}")
+    return t
 
 
 def _encoding_from_chat_template(
@@ -192,11 +214,11 @@ def _encoding_from_chat_template(
             return_tensors=None,
         )
 
-    input_ids = _tensor_to_list(input_ids)
+    input_ids = _flatten_token_list(input_ids)
     if attention_mask is None:
         attention_mask = [1] * len(input_ids)
     else:
-        attention_mask = _tensor_to_list(attention_mask)
+        attention_mask = _flatten_token_list(attention_mask)
     return {"input_ids": input_ids, "attention_mask": attention_mask}
 
 
@@ -302,12 +324,12 @@ class GemmaSpeechModel(nn.Module):
                 enable_thinking=False,
                 return_dict=True,
             )
-            input_ids = _tensor_to_list(encoded["input_ids"])
+            input_ids = _flatten_token_list(encoded["input_ids"])
             attention_mask = encoded.get("attention_mask")
             if attention_mask is None:
                 attention_mask = [1] * len(input_ids)
             else:
-                attention_mask = _tensor_to_list(attention_mask)
+                attention_mask = _flatten_token_list(attention_mask)
             return {"input_ids": input_ids, "attention_mask": attention_mask}
 
         if hasattr(self.tokenizer, "apply_chat_template"):
@@ -339,12 +361,12 @@ class GemmaSpeechModel(nn.Module):
                 enable_thinking=False,
                 return_dict=True,
             )
-            input_ids = _tensor_to_list(encoded["input_ids"])
+            input_ids = _flatten_token_list(encoded["input_ids"])
             attention_mask = encoded.get("attention_mask")
             if attention_mask is None:
                 attention_mask = [1] * len(input_ids)
             else:
-                attention_mask = _tensor_to_list(attention_mask)
+                attention_mask = _flatten_token_list(attention_mask)
             return {"input_ids": input_ids, "attention_mask": attention_mask}
 
         if hasattr(self.tokenizer, "apply_chat_template"):
@@ -398,7 +420,9 @@ class GemmaSpeechModel(nn.Module):
             padding=True,
             return_tensors="pt",
         )
-        return padded["input_ids"].to(device), padded["attention_mask"].to(device)
+        input_ids = _ensure_batched_2d(padded["input_ids"], "input_ids").to(device)
+        attention_mask = _ensure_batched_2d(padded["attention_mask"], "attention_mask").to(device)
+        return input_ids, attention_mask
 
     def forward_generated_answer(
         self,
