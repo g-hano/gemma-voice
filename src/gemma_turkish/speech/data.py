@@ -41,6 +41,52 @@ def _truncate_audio(wave: np.ndarray, sample_rate: int, max_seconds: float) -> n
         return wave[:max_samples]
     return wave
 
+def _read_audio_file(path: str) -> tuple[np.ndarray, int]:
+    import soundfile as sf
+    from datasets.utils.file_utils import is_local_path, xopen
+
+    if is_local_path(path):
+        data, sr = sf.read(path)
+    else:
+        with xopen(path, "rb") as f:
+            data, sr = sf.read(f)
+    wave = np.asarray(data, dtype=np.float32)
+    if wave.ndim > 1:
+        wave = wave.mean(axis=-1)
+    return wave, int(sr)
+
+
+def _read_audio_bytes(raw: bytes) -> tuple[np.ndarray, int]:
+    import io
+    import soundfile as sf
+
+    data, sr = sf.read(io.BytesIO(raw))
+    wave = np.asarray(data, dtype=np.float32)
+    if wave.ndim > 1:
+        wave = wave.mean(axis=-1)
+    return wave, int(sr)
+
+
+def _waveform_from_torchcodec_decoder(audio: Any) -> tuple[np.ndarray, int] | None:
+    """HF datasets ≥4.x may return torchcodec AudioDecoder instead of {array, ...}."""
+    if not hasattr(audio, "get_all_samples"):
+        return None
+    samples = audio.get_all_samples()
+    data = samples.data
+    if hasattr(data, "detach"):
+        data = data.detach().cpu().numpy()
+    else:
+        data = np.asarray(data, dtype=np.float32)
+    if data.ndim == 2:
+        wave = data.mean(axis=0).astype(np.float32)
+    else:
+        wave = np.asarray(data, dtype=np.float32).reshape(-1)
+    sr = int(getattr(samples, "sample_rate", 0) or getattr(getattr(audio, "metadata", None), "sample_rate", 0) or 0)
+    if sr <= 0:
+        return None
+    return wave, sr
+
+
 def _normalize_audio_dict(
     audio: Any,
     audio_col: str,
@@ -48,27 +94,31 @@ def _normalize_audio_dict(
     """Return {array, sampling_rate} or None if unusable."""
     if audio is None:
         return None
+
+    decoded = _waveform_from_torchcodec_decoder(audio)
+    if decoded is not None:
+        wave, sr = decoded
+        if wave.size == 0:
+            return None
+        return {"array": wave, "sampling_rate": sr}
+
     if isinstance(audio, dict):
         if audio.get("array") is not None:
-            return audio
+            arr = np.asarray(audio["array"], dtype=np.float32)
+            if arr.ndim > 1:
+                arr = arr.mean(axis=-1)
+            return {
+                "array": arr,
+                "sampling_rate": int(audio.get("sampling_rate") or 0),
+            }
         if audio.get("bytes"):
-            import io
-            import soundfile as sf
-
-            data, sr = sf.read(io.BytesIO(audio["bytes"]))
-            wave = np.asarray(data, dtype=np.float32)
-            if wave.ndim > 1:
-                wave = wave.mean(axis=-1)
-            return {"array": wave, "sampling_rate": int(sr)}
+            wave, sr = _read_audio_bytes(audio["bytes"])
+            return {"array": wave, "sampling_rate": sr}
 
         path = audio.get("path")
         if path:
-            import soundfile as sf
-            data, sr = sf.read(path)
-            wave = np.asarray(data, dtype=np.float32)
-            if wave.ndim > 1:
-                wave = wave.mean(axis=-1)
-            return {"array": wave, "sampling_rate": int(sr)}
+            wave, sr = _read_audio_file(path)
+            return {"array": wave, "sampling_rate": sr}
     return None
 
 def _row_passes_filters(row: dict[str, Any], config: SpeechTrainConfig) -> bool:
@@ -205,9 +255,10 @@ def load_turkish_speech_dataset(config: SpeechTrainConfig) -> "Dataset":
     else:
         ds = load_dataset(config.dataset_name, **load_kwargs)
 
+    # decode=False → {path, bytes}; we decode with soundfile (no torchcodec required).
     ds = ds.cast_column(
         config.dataset_audio_column,
-        Audio(sampling_rate=config.mimi_sample_rate),
+        Audio(sampling_rate=config.mimi_sample_rate, decode=False),
     )
 
     if config.filter_dataset:
