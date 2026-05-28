@@ -1,6 +1,6 @@
 # Turkish Gemma 4 E2B → Mimi speech-head (Frisson-style)
-# Accept Gemma + Common Voice licenses on Hugging Face; run: huggingface-cli login
-gemma_model_id: Qwen/Qwen3-0.6B
+# Dataset: CC BY 4.0 — https://huggingface.co/datasets/Anilosan15/Synthetic_Turkish_TTS_Data
+gemma_model_id: google/gemma-4-E2B-it
 freeze_gemma: true
 gemma_dtype: bfloat16
 num_tap_layers: 6
@@ -23,10 +23,10 @@ generation_prompt_template: "Şunu kısa ve Türkçe yanıtla:\n{question}"
 generated_question_template: "Aşağıdaki konuda kısa bir Türkçe cümle söyle:\n{context}"
 dataset_question_column: null
 use_generated_answer_states: true
-dataset_name: mozilla-foundation/common_voice_17_0
-dataset_config: tr
+dataset_name: Anilosan15/Synthetic_Turkish_TTS_Data
+dataset_config: null
 dataset_split: train
-dataset_text_column: sentence
+dataset_text_column: text
 dataset_audio_column: audio
 max_samples: 512
 val_fraction: 0.1

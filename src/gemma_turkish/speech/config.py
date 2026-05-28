@@ -38,7 +38,7 @@ class SpeechTrainConfig:
     training_mode: str = "generated_answer"
     max_new_tokens: int = 48
     generation_prompt_template: str = "Şunu kısa ve Türkçe yanıtla:\n{question}"
-    # Common Voice v1: synthetic question from transcript (teacher WAV = reference sentence).
+    # Synthetic question from transcript when dataset has no question column (teacher WAV = reference).
     generated_question_template: str = (
         "Aşağıdaki konuda kısa bir Türkçe cümle söyle:\n{context}"
     )
@@ -46,11 +46,11 @@ class SpeechTrainConfig:
     # Deprecated alias; maps to training_mode in load_config().
     use_generated_answer_states: bool = False
 
-    # --- Data (Common Voice Turkish) ---
-    dataset_name: str = "mozilla-foundation/common_voice_17_0"
-    dataset_config: str = "tr"
+    # --- Data (default: CC BY 4.0 synthetic Turkish TTS on HF) ---
+    dataset_name: str = "Anilosan15/Synthetic_Turkish_TTS_Data"
+    dataset_config: str | None = None  # omit for single-config datasets (e.g. default)
     dataset_split: str = "train"
-    dataset_text_column: str = "sentence"
+    dataset_text_column: str = "text"
     dataset_audio_column: str = "audio"
     max_samples: int | None = 512
     val_fraction: float = 0.1

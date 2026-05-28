@@ -17,11 +17,11 @@ Architecture: [Frisson blog](https://www.frisson-labs.com/gemma4-e4b-architectur
    ```powershell
    python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
    ```
-3. **Hugging Face login** (Gemma 4 + Common Voice):
+3. **Hugging Face login** (only if using a gated backbone such as Gemma 4):
    ```powershell
-   huggingface-cli login
+   hf auth login
    ```
-   Accept the [Gemma license](https://huggingface.co/google/gemma-4-E4B-it) and [Common Voice terms](https://huggingface.co/datasets/mozilla-foundation/common_voice_17_0) in the browser.
+   Accept the [Gemma license](https://huggingface.co/google/gemma-4-E4B-it) in the browser when applicable. The default speech dataset is public ([Synthetic Turkish TTS](https://huggingface.co/datasets/Anilosan15/Synthetic_Turkish_TTS_Data), CC BY 4.0).
 4. **Disk**: E4B (~8B bf16) + Mimi ≈ 16 GB weights; token cache under `data/speech_token_cache/`.
 
 ## Training modes
@@ -51,17 +51,18 @@ Gemma 4 uses `AutoProcessor.apply_chat_template(..., enable_thinking=False)` for
 
 | Role | HF path | Config keys | Columns used | Loader filters |
 |------|---------|-------------|--------------|----------------|
-| **Speech head (default)** | `mozilla-foundation/common_voice_17_0` | `dataset_config: tr`, `dataset_split: train` | `sentence` → text, `audio` → waveform | `min_text_chars` 4, `max_text_chars` 500, audio 0.5–30 s, resample 24 kHz |
-| **Smoke / offline** | `--demo` | synthetic | `question`, `sentence`, `audio` | 4 Turkish QA pairs + noise WAV |
+| **Speech head (default)** | [Anilosan15/Synthetic_Turkish_TTS_Data](https://huggingface.co/datasets/Anilosan15/Synthetic_Turkish_TTS_Data) | `dataset_split: train` | `text` → transcript, `audio` → waveform | CC BY 4.0; 13k clips; `min_text_chars` 4, `max_text_chars` 500, audio 0.5–30 s, resample 24 kHz |
+| **Alternative** | [erenfazlioglu/turkishvoicedataset](https://huggingface.co/datasets/erenfazlioglu/turkishvoicedataset) | — | `transcription` → text, `audio` → waveform | Set `dataset_text_column: transcription` |
+| **Smoke / offline** | `--demo` | synthetic | `question`, `text`, `audio` | 4 Turkish QA pairs + noise WAV |
 | **Text SFT (phase A)** | `tascib/turkish-instruction`, etc. | — | — | See [setup.md](setup.md); not used by speech script |
 
-Common Voice row shape (after `cast_column` to `Audio(24000)`):
+Default dataset row shape (after `cast_column` to `Audio(24000)`):
 
 | Column | Maps to |
 |--------|---------|
-| `sentence` | Turkish transcript → `text_prompt_template` |
+| `text` | Turkish transcript → `generated_question_template` / teacher target |
 | `audio` | `{"array", "sampling_rate"}` → Mimi teacher encode |
-| `path` | Ignored (decoded via `audio`) |
+| `speaker`, `source` | Ignored (optional metadata) |
 
 ## Run training
 
@@ -72,7 +73,7 @@ cd C:\Users\Cihan\Desktop\gemma
 # Config check (no weight download)
 python scripts/train_speech.py --config configs/speech_default.yaml --validate-only
 
-# Full run (E4B + Common Voice TR)
+# Full run (backbone + Synthetic Turkish TTS)
 python scripts/train_speech.py --config configs/speech_default.yaml
 
 # Small generated-answer run (demo QA, 20 steps; auto-fallback to gemma-2-2b-it on --demo)

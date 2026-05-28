@@ -20,7 +20,7 @@ Verify GPU (RTX 3080):
 python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
 ```
 
-Hugging Face (gated Gemma + Common Voice):
+Hugging Face (gated Gemma, if used):
 
 ```powershell
 huggingface-cli login
@@ -47,7 +47,7 @@ See **[docs/training.md](docs/training.md)** for dataset columns, VRAM notes, an
 |------|--------|
 | Backbone | `google/gemma-4-E4B-it` |
 | Codec | `kyutai/mimi` (8 codebooks, 24 kHz) |
-| Dataset | `mozilla-foundation/common_voice_17_0` / `tr` |
+| Dataset | `Anilosan15/Synthetic_Turkish_TTS_Data` (CC BY 4.0) |
 | Tap | Last **6** of **42** decoder layers |
 | Hidden | **2560** (E4B text decoder) |
 

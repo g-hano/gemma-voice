@@ -199,12 +199,11 @@ def load_turkish_speech_dataset(config: SpeechTrainConfig) -> "Dataset":
 
     from datasets import Audio, load_dataset
 
-    ds = load_dataset(
-        config.dataset_name,
-        config.dataset_config,
-        split=config.dataset_split,
-        trust_remote_code=True,
-    )
+    load_kwargs: dict[str, Any] = {"split": config.dataset_split}
+    if config.dataset_config:
+        ds = load_dataset(config.dataset_name, config.dataset_config, **load_kwargs)
+    else:
+        ds = load_dataset(config.dataset_name, **load_kwargs)
 
     ds = ds.cast_column(
         config.dataset_audio_column,
