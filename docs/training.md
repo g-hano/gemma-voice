@@ -51,7 +51,7 @@ Gemma 4 uses `AutoProcessor.apply_chat_template(..., enable_thinking=False)` for
 
 | Role | HF path | Config keys | Columns used | Loader filters |
 |------|---------|-------------|--------------|----------------|
-| **Speech head (default)** | [Anilosan15/Synthetic_Turkish_TTS_Data](https://huggingface.co/datasets/Anilosan15/Synthetic_Turkish_TTS_Data) | `dataset_split: train` | `text` → transcript, `audio` → waveform | CC BY 4.0; 13k clips; resample 24 kHz. Optional `filter_dataset: true` drops rows by text/audio length (not language). |
+| **Speech head (default)** | [Anilosan15/Synthetic_Turkish_TTS_Data](https://huggingface.co/datasets/Anilosan15/Synthetic_Turkish_TTS_Data) | `dataset_split: train` | `text` → transcript, `audio` → waveform | CC BY 4.0; ~13k clips; resample 24 kHz. Default `max_samples: null` uses the full split; set e.g. `max_samples: 512` for fast debug. Optional `filter_dataset: true` drops rows by text/audio length (not language). |
 | **Alternative** | [erenfazlioglu/turkishvoicedataset](https://huggingface.co/datasets/erenfazlioglu/turkishvoicedataset) | — | `transcription` → text, `audio` → waveform | Set `dataset_text_column: transcription` |
 | **Smoke / offline** | `--demo` | synthetic | `question`, `text`, `audio` | 4 Turkish QA pairs + noise WAV |
 | **Text SFT (phase A)** | `tascib/turkish-instruction`, etc. | — | — | See [setup.md](setup.md); not used by speech script |
@@ -117,7 +117,9 @@ python scripts/generate_speech_tokens.py `
 | Speech head + activations | ~0.5–1 GB |
 | **Total** | **Often tight on 12 GB** — OOM possible |
 
-Mitigations: shorter `max_audio_seconds`, smaller `max_samples` while debugging, 4-bit Gemma (not in this repo), or a 24 GB GPU.
+Mitigations: shorter `max_audio_seconds`, cap `max_samples` while debugging, 4-bit Gemma (not in this repo), or a 24 GB GPU.
+
+Default training (`configs/speech_default.yaml`): `max_samples: null` (full ~13k split), `max_steps: 4500` (~3 epochs with `gradient_accumulation_steps: 8`). Override on the CLI, e.g. `--max_samples 512 --max_steps 500`.
 
 ## Import check
 

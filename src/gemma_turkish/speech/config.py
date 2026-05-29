@@ -52,7 +52,7 @@ class SpeechTrainConfig:
     dataset_split: str = "train"
     dataset_text_column: str = "text"
     dataset_audio_column: str = "audio"
-    max_samples: int | None = 512
+    max_samples: int | None = None  # None = use full dataset split
     val_fraction: float = 0.1
     # Quality gate (text length, decodable audio, duration). Off by default for curated HF TTS sets.
     filter_dataset: bool = False
@@ -68,7 +68,7 @@ class SpeechTrainConfig:
     per_device_train_batch_size: int = 1
     per_device_eval_batch_size: int = 1
     gradient_accumulation_steps: int = 8
-    max_steps: int = 500
+    max_steps: int = 4500
     logging_steps: int = 10
     eval_steps: int = 50
     save_steps: int = 100

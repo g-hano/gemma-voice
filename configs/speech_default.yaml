@@ -28,7 +28,8 @@ dataset_config: null
 dataset_split: train
 dataset_text_column: text
 dataset_audio_column: audio
-max_samples: 512
+# null = full HF split (~13k for Synthetic_Turkish_TTS_Data)
+max_samples: null
 val_fraction: 0.1
 filter_dataset: false
 use_demo_dataset: false
@@ -38,6 +39,7 @@ output_dir: outputs/speech_head
 learning_rate: 3.0e-4
 per_device_train_batch_size: 1
 gradient_accumulation_steps: 8
-max_steps: 500
+# ~3 epochs at ~13k rows, grad_accum 8 (train ~11.7k / 8 ≈ 1460 steps/epoch)
+max_steps: 4500
 bf16: true
 report_to: none
