@@ -78,8 +78,7 @@ def main() -> None:
         overrides["head_hidden_dim"] = 896
         overrides["gradient_checkpointing"] = False
 
-    cfg = load_config(args.config, overrides=overrides or None)
-    cfg.resolve_paths(ROOT)
+    cfg = load_config(args.config, overrides=overrides or None, project_root=ROOT)
 
     if args.validate_only:
         print("Config OK:")
@@ -119,7 +118,7 @@ def main() -> None:
         print("CUDA not available — using float32 on CPU (slow; prefer --demo --smoke).")
 
     print(
-        f"Gemma: {cfg.gemma_model_id} | mode: {cfg.training_mode} | "
+        f"Gemma: {cfg.gemma_model_id} | head: {cfg.head_type} | mode: {cfg.training_mode} | "
         f"Mimi: {cfg.mimi_model_id} | out: {cfg.output_dir}"
     )
 

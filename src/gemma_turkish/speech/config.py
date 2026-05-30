@@ -24,9 +24,19 @@ class SpeechTrainConfig:
     max_audio_seconds: float = 30.0
     min_audio_seconds: float = 0.5
 
-    # --- Speech head (~152M scale at hidden 2560 — see model.ParallelSpeechHead) ---
-    head_hidden_dim: int = 2560
+    # --- Speech head ---
+    # "autoregressive": cross-attention Transformer decoder over Mimi frames (recommended).
+    # "parallel": legacy pooled-vector head (cannot model temporal/content structure).
+    head_type: str = "autoregressive"
+    head_hidden_dim: int = 2560  # parallel head only
     max_speech_frames: int = 375  # 30 s * 12.5 Hz
+
+    # --- Autoregressive speech decoder (cross-attends to full Gemma hidden states) ---
+    speech_decoder_d_model: int = 1024
+    speech_decoder_layers: int = 6
+    speech_decoder_heads: int = 8
+    speech_decoder_ffn_dim: int = 4096
+    speech_decoder_dropout: float = 0.1
 
     # --- Turkish text conditioning (blog EN: Say this naturally as speech:\n{text}) ---
     text_prompt_template: str = "Bunu doğal bir konuşma gibi söyle:\n{text}"
@@ -54,11 +64,23 @@ class SpeechTrainConfig:
     dataset_audio_column: str = "audio"
     max_samples: int | None = None  # None = use full dataset split
     val_fraction: float = 0.1
+    max_eval_samples: int | None = 200  # cap eval set so eval stays cheap
     # Quality gate (text length, decodable audio, duration). Off by default for curated HF TTS sets.
     filter_dataset: bool = False
     use_demo_dataset: bool = False
     cache_speech_tokens: bool = True
     cache_dir: str = "data/speech_token_cache"
+    # Cache frozen Gemma last-N hidden states to disk (skips the Gemma forward each step).
+    # Big speedup but uses disk (~few MB/sample in fp16); the trainable layer-mix is applied
+    # on the fly so caching the raw frozen states stays correct.
+    cache_gemma_features: bool = False
+    gemma_feature_cache_dir: str = "data/gemma_feature_cache"
+
+    # --- Gemma placement / offload (16 GB GPUs) ---
+    # None = whole backbone on the training device. "auto"/"balanced" = accelerate device_map
+    # with CPU offload (frozen forward only, no optimizer state, so offload is safe but slower).
+    gemma_device_map: str | None = None
+    gemma_max_gpu_memory_gib: float | None = None  # e.g. 12.0 to reserve VRAM for the head
 
     # --- Optimization ---
     output_dir: str = "outputs/speech_head"
@@ -77,6 +99,11 @@ class SpeechTrainConfig:
     bf16: bool = True
     dataloader_num_workers: int = 0
 
+    # --- Eval audio synthesis (decode a sample to WAV after every eval) ---
+    eval_audio_samples: int = 1  # how many eval texts to synthesize each eval
+    eval_audio_max_frames: int = 150  # cap generated frames (12.5 Hz → ~12 s) to keep it fast
+    eval_audio_dir: str | None = None  # default: {output_dir}/eval_audio
+
     # --- Extra ---
     report_to: str = "none"  # none | tensorboard | wandb
     log_generated_outputs: bool = True
@@ -85,7 +112,13 @@ class SpeechTrainConfig:
     def resolve_paths(self, project_root: Path | None = None) -> None:
         root = project_root or Path.cwd()
         self.cache_dir = str((root / self.cache_dir).resolve())
+        self.gemma_feature_cache_dir = str((root / self.gemma_feature_cache_dir).resolve())
         self.output_dir = str((root / self.output_dir).resolve())
+        if self.eval_audio_dir is None:
+            self.eval_audio_dir = str((Path(self.output_dir) / "eval_audio").resolve())
+        else:
+            ea = Path(self.eval_audio_dir)
+            self.eval_audio_dir = str((ea if ea.is_absolute() else root / ea).resolve())
         if self.generated_log_path is None:
             self.generated_log_path = str((Path(self.output_dir) / "generated_outputs.jsonl").resolve())
         else:
@@ -125,7 +158,12 @@ def _apply_training_mode_compat(data: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def load_config(path: str | Path | None = None, overrides: dict[str, Any] | None = None) -> SpeechTrainConfig:
+def load_config(
+    path: str | Path | None = None,
+    overrides: dict[str, Any] | None = None,
+    project_root: Path | None = None,
+) -> SpeechTrainConfig:
+    root = project_root or Path.cwd()
     if path:
         with Path(path).open(encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
@@ -133,9 +171,10 @@ def load_config(path: str | Path | None = None, overrides: dict[str, Any] | None
         cfg = SpeechTrainConfig.from_dict(data)
     else:
         cfg = SpeechTrainConfig()
-    cfg.resolve_paths()
     if overrides:
-        merged = _apply_training_mode_compat({**cfg.to_dict(), **{k: v for k, v in overrides.items() if v is not None}})
+        merged = _apply_training_mode_compat(
+            {**cfg.to_dict(), **{k: v for k, v in overrides.items() if v is not None}}
+        )
         cfg = SpeechTrainConfig.from_dict(merged)
-        cfg.resolve_paths()
+    cfg.resolve_paths(root)
     return cfg

@@ -1,5 +1,6 @@
 """Gemma decoder tap + parallel Mimi speech-token head (Frisson E4B style)."""
 from __future__ import annotations
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -67,6 +68,146 @@ class ParallelSpeechHead(nn.Module):
         return logits
 
 
+class AutoregressiveSpeechHead(nn.Module):
+    """
+    Transformer decoder over Mimi frames that cross-attends to the full sequence of
+    Gemma hidden states (B, L, H), instead of a single pooled vector.
+
+    - Temporal structure: causal self-attention over frames.
+    - Text/content conditioning: cross-attention to every Gemma token state.
+    - RVQ structure: within a frame, codebook ``k`` is predicted conditioned on the
+      (teacher-forced) lower codebooks ``<k`` (residual quantization is sequential).
+    """
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        num_codebooks: int,
+        codebook_size: int,
+        max_frames: int,
+        d_model: int,
+        num_layers: int,
+        num_heads: int,
+        ffn_dim: int,
+        dropout: float,
+    ) -> None:
+        super().__init__()
+        self.num_codebooks = num_codebooks
+        self.codebook_size = codebook_size
+        self.max_frames = max_frames
+        self.d_model = d_model
+
+        self.memory_proj = nn.Linear(hidden_dim, d_model)
+        self.code_embed = nn.ModuleList(
+            [nn.Embedding(codebook_size, d_model) for _ in range(num_codebooks)]
+        )
+        self.bos = nn.Parameter(torch.zeros(d_model))
+        self.frame_pos = nn.Parameter(torch.zeros(max_frames, d_model))
+        layer = nn.TransformerDecoderLayer(
+            d_model=d_model,
+            nhead=num_heads,
+            dim_feedforward=ffn_dim,
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.decoder = nn.TransformerDecoder(layer, num_layers=num_layers)
+        self.out_norm = nn.LayerNorm(d_model)
+        self.cb_heads = nn.ModuleList(
+            [nn.Linear(d_model, codebook_size) for _ in range(num_codebooks)]
+        )
+        nn.init.normal_(self.frame_pos, std=0.02)
+        nn.init.normal_(self.bos, std=0.02)
+
+    def _causal_mask(self, t: int, device: torch.device) -> torch.Tensor:
+        return torch.triu(
+            torch.ones(t, t, dtype=torch.bool, device=device), diagonal=1
+        )
+
+    def _frame_inputs(self, codes: torch.Tensor) -> torch.Tensor:
+        """Teacher-forced decoder inputs: frame t sees the *previous* frame's codes."""
+        b, k, t = codes.shape
+        emb = sum(self.code_embed[i](codes[:, i, :]) for i in range(k))  # (B, T, d)
+        dec_in = torch.zeros(b, t, self.d_model, dtype=emb.dtype, device=emb.device)
+        dec_in[:, 0] = self.bos.to(emb.dtype)
+        if t > 1:
+            dec_in[:, 1:] = emb[:, :-1]
+        dec_in = dec_in + self.frame_pos[:t].unsqueeze(0).to(emb.dtype)
+        return dec_in
+
+    def forward(
+        self,
+        memory: torch.Tensor,
+        memory_mask: torch.Tensor,
+        codes: torch.Tensor,
+        frame_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Teacher-forced logits (B, T, K, V). ``codes`` is (B, K, T)."""
+        mem = self.memory_proj(memory)
+        mem_pad = memory_mask == 0
+        dec_in = self._frame_inputs(codes)
+        t = dec_in.size(1)
+        tgt_pad = frame_mask == 0
+        h = self.decoder(
+            tgt=dec_in,
+            memory=mem,
+            tgt_mask=self._causal_mask(t, dec_in.device),
+            tgt_key_padding_mask=tgt_pad,
+            memory_key_padding_mask=mem_pad,
+        )
+        h = self.out_norm(h)
+        cond = h
+        logits = []
+        for k in range(self.num_codebooks):
+            logits.append(self.cb_heads[k](cond))
+            if k < self.num_codebooks - 1:
+                cond = cond + self.code_embed[k](codes[:, k, :])
+        return torch.stack(logits, dim=2)  # (B, T, K, V)
+
+    @torch.inference_mode()
+    def generate(
+        self,
+        memory: torch.Tensor,
+        memory_mask: torch.Tensor,
+        num_frames: int,
+    ) -> torch.LongTensor:
+        """Autoregressively sample codes (B, K, T) frame-by-frame, codebook-by-codebook."""
+        mem = self.memory_proj(memory)
+        mem_pad = memory_mask == 0
+        b = memory.size(0)
+        device = memory.device
+        num_frames = min(num_frames, self.max_frames)
+        inputs_emb: list[torch.Tensor] = []
+        generated: list[torch.Tensor] = []
+        prev_codes: torch.Tensor | None = None
+        for t in range(num_frames):
+            if t == 0:
+                step_in = self.bos.to(mem.dtype).unsqueeze(0).expand(b, -1)
+            else:
+                step_in = sum(
+                    self.code_embed[i](prev_codes[:, i]) for i in range(self.num_codebooks)
+                )
+            inputs_emb.append(step_in)
+            seq = torch.stack(inputs_emb, dim=1) + self.frame_pos[: t + 1].unsqueeze(0).to(mem.dtype)
+            h = self.decoder(
+                tgt=seq,
+                memory=mem,
+                tgt_mask=self._causal_mask(t + 1, device),
+                memory_key_padding_mask=mem_pad,
+            )
+            h_t = self.out_norm(h[:, -1])
+            cond = h_t
+            frame_codes = []
+            for k in range(self.num_codebooks):
+                tok = self.cb_heads[k](cond).argmax(dim=-1)
+                frame_codes.append(tok)
+                cond = cond + self.code_embed[k](tok)
+            prev_codes = torch.stack(frame_codes, dim=1)  # (B, K)
+            generated.append(prev_codes)
+        return torch.stack(generated, dim=2).long()  # (B, K, T)
+
+
 def _last_token_states(hidden: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
     lengths = attention_mask.long().sum(dim=1).clamp(min=1) - 1
     batch_idx = torch.arange(hidden.size(0), device=hidden.device)
@@ -123,8 +264,27 @@ def _is_gemma4_model_id(model_id: str) -> bool:
     return "gemma-4" in mid or "gemma4" in mid
 
 
-def _load_gemma_backbone(model_id: str, dtype: torch.dtype, gradient_checkpointing: bool):
+def _device_map_kwargs(
+    device_map: str | None, max_gpu_memory_gib: float | None
+) -> dict[str, Any]:
+    """Build from_pretrained kwargs for optional accelerate device_map / CPU offload."""
+    if not device_map:
+        return {}
+    kwargs: dict[str, Any] = {"device_map": device_map}
+    if max_gpu_memory_gib is not None and torch.cuda.is_available():
+        kwargs["max_memory"] = {0: f"{max_gpu_memory_gib}GiB", "cpu": "64GiB"}
+    return kwargs
+
+
+def _load_gemma_backbone(
+    model_id: str,
+    dtype: torch.dtype,
+    gradient_checkpointing: bool,
+    device_map: str | None = None,
+    max_gpu_memory_gib: float | None = None,
+):
     """Load Gemma 4 multimodal LM or fall back to causal LM for older checkpoints."""
+    offload = _device_map_kwargs(device_map, max_gpu_memory_gib)
     if _is_gemma4_model_id(model_id):
         from transformers import AutoProcessor, Gemma4ForConditionalGeneration
 
@@ -133,6 +293,7 @@ def _load_gemma_backbone(model_id: str, dtype: torch.dtype, gradient_checkpointi
             model_id,
             torch_dtype=dtype,
             attn_implementation="sdpa",
+            **offload,
         )
         if gradient_checkpointing:
             gemma.gradient_checkpointing_enable()
@@ -145,6 +306,7 @@ def _load_gemma_backbone(model_id: str, dtype: torch.dtype, gradient_checkpointi
         model_id,
         torch_dtype=dtype,
         attn_implementation="sdpa",
+        **offload,
     )
     if gradient_checkpointing and hasattr(gemma, "gradient_checkpointing_enable"):
         gemma.gradient_checkpointing_enable()
@@ -239,7 +401,10 @@ class GemmaSpeechModel(nn.Module):
             config.gemma_model_id,
             dtype=dtype,
             gradient_checkpointing=config.gradient_checkpointing,
+            device_map=config.gemma_device_map,
+            max_gpu_memory_gib=config.gemma_max_gpu_memory_gib,
         )
+        self._gemma_offloaded = bool(config.gemma_device_map)
         self.tokenizer = getattr(self.processor, "tokenizer", self.processor)
 
         if self.tokenizer.pad_token is None:
@@ -254,13 +419,27 @@ class GemmaSpeechModel(nn.Module):
         hidden_dim = _text_hidden_size(self.gemma)
 
         self.layer_mix = LastLayerMix(config.num_tap_layers)
-        self.speech_head = ParallelSpeechHead(
-            hidden_dim=hidden_dim,
-            num_codebooks=config.num_codebooks,
-            codebook_size=self.codec.codebook_size,
-            max_frames=config.max_speech_frames,
-            head_hidden_dim=config.head_hidden_dim,
-        )
+        self.head_type = getattr(config, "head_type", "autoregressive")
+        if self.head_type == "autoregressive":
+            self.speech_head = AutoregressiveSpeechHead(
+                hidden_dim=hidden_dim,
+                num_codebooks=config.num_codebooks,
+                codebook_size=self.codec.codebook_size,
+                max_frames=config.max_speech_frames,
+                d_model=config.speech_decoder_d_model,
+                num_layers=config.speech_decoder_layers,
+                num_heads=config.speech_decoder_heads,
+                ffn_dim=config.speech_decoder_ffn_dim,
+                dropout=config.speech_decoder_dropout,
+            )
+        else:
+            self.speech_head = ParallelSpeechHead(
+                hidden_dim=hidden_dim,
+                num_codebooks=config.num_codebooks,
+                codebook_size=self.codec.codebook_size,
+                max_frames=config.max_speech_frames,
+                head_hidden_dim=config.head_hidden_dim,
+            )
 
         if config.freeze_gemma:
             self.gemma.requires_grad_(False)
@@ -386,11 +565,30 @@ class GemmaSpeechModel(nn.Module):
             return_tensors=None,
         )
 
+    def _feature_cache_path(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> Path | None:
+        if not getattr(self.config, "cache_gemma_features", False):
+            return None
+        if self._gemma_offloaded or input_ids.size(0) != 1:
+            return None  # only safe / useful for single, un-padded sequences
+        real = input_ids[0][attention_mask[0].bool()].tolist()
+        key = f"{self.config.num_tap_layers}_" + ",".join(map(str, real))
+        digest = hashlib.sha1(key.encode("utf-8")).hexdigest()
+        root = Path(self.config.gemma_feature_cache_dir)
+        root.mkdir(parents=True, exist_ok=True)
+        return root / f"{digest}.pt"
+
     def _gemma_forward_hidden(
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, ...]:
+        cache_path = self._feature_cache_path(input_ids, attention_mask)
+        if cache_path is not None and cache_path.is_file():
+            device = next(self.layer_mix.parameters()).device
+            dtype = _resolve_dtype(self.config.gemma_dtype)
+            cached = torch.load(cache_path, weights_only=True)
+            return tuple(t.to(device=device, dtype=dtype) for t in cached["last_states"])
+
         outputs = self.gemma(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -402,6 +600,10 @@ class GemmaSpeechModel(nn.Module):
             raise RuntimeError(
                 "Gemma forward did not return hidden_states; check output_hidden_states=True."
             )
+        if cache_path is not None:
+            n = self.config.num_tap_layers
+            last = [h.detach().to(torch.float16).cpu() for h in hidden_states[-n:]]
+            torch.save({"last_states": last}, cache_path)
         return hidden_states
 
     def _tokenize_questions_batch(
@@ -480,10 +682,16 @@ class GemmaSpeechModel(nn.Module):
 
         hidden_states = self._gemma_forward_hidden(generated_ids, full_mask)
         mixed = self.layer_mix(hidden_states)
-        answer_start = min(prompt_len, full_len - 1)
-        pooled = _mean_answer_pool(mixed, answer_start, full_mask)
-        num_frames = speech_token_ids.shape[-1]
-        logits = self.speech_head(pooled, num_frames=num_frames)
+        if self.head_type == "autoregressive":
+            # Cross-attend only over the generated answer span.
+            answer_start = min(prompt_len, full_len - 1)
+            mem = mixed[:, answer_start:, :]
+            mem_mask = full_mask[:, answer_start:]
+            logits = self.speech_head(mem, mem_mask, speech_token_ids, speech_frame_mask)
+        else:
+            answer_start = min(prompt_len, full_len - 1)
+            pooled = _mean_answer_pool(mixed, answer_start, full_mask)
+            logits = self.speech_head(pooled, num_frames=speech_token_ids.shape[-1])
         loss = speech_token_loss(logits, speech_token_ids, speech_frame_mask)
         return {"loss": loss, "logits": logits}
 
@@ -511,11 +719,18 @@ class GemmaSpeechModel(nn.Module):
 
         if input_ids is None or attention_mask is None or speech_token_ids is None:
             raise ValueError("teacher_forced mode requires input_ids, attention_mask, speech tokens")
+        if speech_frame_mask is None:
+            speech_frame_mask = torch.ones(
+                speech_token_ids.shape[0], speech_token_ids.shape[-1],
+                dtype=torch.float32, device=speech_token_ids.device,
+            )
         hidden_states = self._gemma_forward_hidden(input_ids, attention_mask)
         mixed = self.layer_mix(hidden_states)
-        pooled = _last_token_states(mixed, attention_mask)
-        num_frames = speech_token_ids.shape[-1]
-        logits = self.speech_head(pooled, num_frames=num_frames)
+        if self.head_type == "autoregressive":
+            logits = self.speech_head(mixed, attention_mask, speech_token_ids, speech_frame_mask)
+        else:
+            pooled = _last_token_states(mixed, attention_mask)
+            logits = self.speech_head(pooled, num_frames=speech_token_ids.shape[-1])
         loss = speech_token_loss(logits, speech_token_ids, speech_frame_mask)
         return {"loss": loss, "logits": logits}
 
@@ -529,6 +744,27 @@ class GemmaSpeechModel(nn.Module):
         self.eval()
         hidden_states = self._gemma_forward_hidden(input_ids, attention_mask)
         mixed = self.layer_mix(hidden_states)
+        if self.head_type == "autoregressive":
+            return self.speech_head.generate(mixed, attention_mask, num_frames)
         pooled = _last_token_states(mixed, attention_mask)
         logits = self.speech_head(pooled, num_frames=num_frames)
         return logits.argmax(dim=-1).permute(0, 2, 1)  # (B, K, T)
+
+    @torch.inference_mode()
+    def synthesize(self, text: str, num_frames: int | None = None) -> torch.Tensor:
+        """Text → predicted Mimi codes → waveform (1, samples). Conditions on the transcript."""
+        self.eval()
+        device = next(self.speech_head.parameters()).device
+        enc = self.encode_text_prompt(text)
+        padded = self.tokenizer.pad(
+            {"input_ids": [enc["input_ids"]], "attention_mask": [enc["attention_mask"]]},
+            padding=True,
+            return_tensors="pt",
+        )
+        input_ids = _ensure_batched_2d(padded["input_ids"], "input_ids").to(device)
+        attention_mask = _ensure_batched_2d(padded["attention_mask"], "attention_mask").to(device)
+        n = num_frames or self.config.eval_audio_max_frames
+        codes = self.predict_speech_tokens(input_ids, attention_mask, n)
+        codes = codes.to(next(self.codec.parameters()).device)
+        waveform = self.codec.decode_codes(codes)  # (B, 1, samples)
+        return waveform[0].detach().float().cpu()

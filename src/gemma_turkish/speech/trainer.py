@@ -3,12 +3,49 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 import torch
+from transformers import TrainerCallback
 from gemma_turkish.speech.collator import SpeechCollator
 from gemma_turkish.speech.config import SpeechTrainConfig
 from gemma_turkish.speech.data import TurkishSpeechDataset, load_turkish_speech_dataset, train_val_split
 
 if TYPE_CHECKING:
     from gemma_turkish.speech.model import GemmaSpeechModel
+
+
+class EvalAudioCallback(TrainerCallback):
+    """After each eval, synthesize a few fixed eval texts to WAV for listening."""
+
+    def __init__(self, config: SpeechTrainConfig, texts: list[str]) -> None:
+        self.config = config
+        self.texts = texts
+
+    def on_evaluate(self, args, state, control, **kwargs) -> None:
+        model = kwargs.get("model")
+        if model is None or not self.texts:
+            return
+        import soundfile as sf
+
+        out_dir = Path(self.config.eval_audio_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        step = int(state.global_step)
+        sr = int(self.config.mimi_sample_rate)
+        was_training = model.training
+        model.eval()
+        try:
+            for i, text in enumerate(self.texts[: self.config.eval_audio_samples]):
+                try:
+                    wave = model.synthesize(text, num_frames=self.config.eval_audio_max_frames)
+                    audio = wave.squeeze().numpy()
+                    path = out_dir / f"step{step:06d}_sample{i}.wav"
+                    sf.write(str(path), audio, sr)
+                    (out_dir / f"step{step:06d}_sample{i}.txt").write_text(
+                        text, encoding="utf-8"
+                    )
+                except Exception as exc:  # keep training alive on synth errors
+                    print(f"[eval-audio] sample {i} failed: {exc}")
+        finally:
+            if was_training:
+                model.train()
 
 def build_trainer(
     model: GemmaSpeechModel,
@@ -65,6 +102,14 @@ def build_trainer(
     full = load_turkish_speech_dataset(config)
     train_ds, eval_ds = train_val_split(full, config.val_fraction, config.seed)
 
+    if config.max_eval_samples is not None and len(eval_ds) > config.max_eval_samples:
+        eval_ds = eval_ds.select(range(config.max_eval_samples))
+
+    eval_audio_texts = [
+        str(eval_ds[i][config.dataset_text_column])
+        for i in range(min(config.eval_audio_samples, len(eval_ds)))
+    ]
+
     encode_fn = (
         None
         if config.training_mode == "generated_answer"
@@ -103,12 +148,17 @@ def build_trainer(
         seed=config.seed,
     )
 
+    callbacks = []
+    if not smoke and config.eval_audio_samples > 0 and eval_audio_texts:
+        callbacks.append(EvalAudioCallback(config, eval_audio_texts))
+
     return SpeechHeadTrainer(
         model=model,
         args=args,
         train_dataset=train_set,
         eval_dataset=eval_set,
         data_collator=SpeechCollator(model.tokenizer),
+        callbacks=callbacks,
         optimizers=(
             torch.optim.AdamW(
                 trainable, lr=config.learning_rate, weight_decay=config.weight_decay
