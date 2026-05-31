@@ -1,4 +1,4 @@
-# Turkish Gemma 4 E2B → Mimi speech-head (Frisson-style)
+# Turkish Gemma 4 E2B → Mimi speech-head (v2 — scheduled sampling + cosine LR)
 # Dataset: CC BY 4.0 — https://huggingface.co/datasets/Anilosan15/Synthetic_Turkish_TTS_Data
 gemma_model_id: google/gemma-4-E2B-it
 freeze_gemma: true
@@ -11,7 +11,7 @@ num_codebooks: 8
 mimi_sample_rate: 24000
 max_audio_seconds: 30.0
 min_audio_seconds: 0.5
-# Autoregressive cross-attention speech decoder (recommended). "parallel" = legacy pooled head.
+
 head_type: autoregressive
 speech_decoder_d_model: 1024
 speech_decoder_layers: 6
@@ -20,24 +20,31 @@ speech_decoder_ffn_dim: 4096
 speech_decoder_dropout: 0.1
 head_hidden_dim: 2560
 max_speech_frames: 375
+
+# Scheduled sampling: ramp model's own preds as decoder input (fixes exposure bias)
+scheduled_sampling_enabled: true
+scheduled_sampling_max_prob: 0.5
+scheduled_sampling_ramp_steps: 8000
+
+# Coarse Mimi codebooks weighted higher (null = auto geometric decay)
+codebook_loss_weights: null
+
 text_prompt_template: "Bunu doğal bir konuşma gibi söyle:\n{text}"
 max_text_length: 512
 min_text_chars: 4
 max_text_chars: 500
-# teacher_forced: condition on the real transcript and predict its own audio (correct TTS target).
-# generated_answer is mismatched for TTS (predicts audio of a different generated sentence).
 training_mode: teacher_forced
 max_new_tokens: 48
 generation_prompt_template: "Şunu kısa ve Türkçe yanıtla:\n{question}"
 generated_question_template: "Aşağıdaki konuda kısa bir Türkçe cümle söyle:\n{context}"
 dataset_question_column: null
 use_generated_answer_states: false
+
 dataset_name: Anilosan15/Synthetic_Turkish_TTS_Data
 dataset_config: null
 dataset_split: train
 dataset_text_column: text
 dataset_audio_column: audio
-# null = full HF split (~13k for Synthetic_Turkish_TTS_Data)
 max_samples: null
 val_fraction: 0.1
 max_eval_samples: 200
@@ -45,25 +52,25 @@ filter_dataset: false
 use_demo_dataset: false
 cache_speech_tokens: true
 cache_dir: data/speech_token_cache
-# Cache frozen Gemma hidden states to disk (~few MB/sample fp16). Big speedup, costs disk.
 cache_gemma_features: true
 gemma_feature_cache_dir: data/gemma_feature_cache
-# CPU offload for tight VRAM: set to "auto" + a GiB cap. null = whole backbone on GPU (E2B fits in 16 GB).
 gemma_device_map: null
 gemma_max_gpu_memory_gib: null
-output_dir: outputs/speech_head
-learning_rate: 3.0e-4
+
+# Fresh run — new output dir (old checkpoints stay in outputs/speech_head/)
+output_dir: outputs/speech_head_v2
+learning_rate: 2.0e-4
+lr_scheduler_type: cosine
 per_device_train_batch_size: 1
 gradient_accumulation_steps: 8
-# ~3 epochs at ~13k rows, grad_accum 8 (train ~11.7k / 8 ≈ 1460 steps/epoch)
-# Continue from checkpoint-4500 for ~3 more epochs (4500 → 9000).
-max_steps: 9000
-resume_from_checkpoint: outputs/speech_head/checkpoint-4500
-# Eval is much cheaper now (subset + no per-step generation), so we can eval less often.
+# ~8 epochs: 11700 / 8 ≈ 1460 steps/epoch × 8 ≈ 11700; + buffer → 12000
+max_steps: 12000
+resume_from_checkpoint: null
 eval_steps: 500
 save_steps: 500
 logging_steps: 10
-# Synthesize eval texts to WAV. Length = reference audio frames (+margin), NOT fixed 150 (=12 s).
+warmup_ratio: 0.03
+
 eval_audio_samples: 2
 eval_audio_max_frames: 150
 eval_audio_frame_margin: 5
@@ -72,5 +79,7 @@ synth_chars_per_second: 14.0
 synth_early_stop: true
 synth_early_stop_patience: 4
 synth_min_frames: 20
+synth_temperature: 0.85
+synth_top_p: 0.92
 bf16: true
 report_to: none

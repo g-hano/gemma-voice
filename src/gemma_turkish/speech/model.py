@@ -136,26 +136,24 @@ class AutoregressiveSpeechHead(nn.Module):
         dec_in = dec_in + self.frame_pos[:t].unsqueeze(0).to(emb.dtype)
         return dec_in
 
-    def forward(
+    def _run_decoder(
         self,
-        memory: torch.Tensor,
-        memory_mask: torch.Tensor,
-        codes: torch.Tensor,
+        dec_in: torch.Tensor,
+        mem: torch.Tensor,
+        mem_pad: torch.Tensor,
         frame_mask: torch.Tensor,
     ) -> torch.Tensor:
-        """Teacher-forced logits (B, T, K, V). ``codes`` is (B, K, T)."""
-        mem = self.memory_proj(memory)
-        mem_pad = memory_mask == 0
-        dec_in = self._frame_inputs(codes)
         t = dec_in.size(1)
         tgt_pad = frame_mask == 0
-        h = self.decoder(
+        return self.decoder(
             tgt=dec_in,
             memory=mem,
             tgt_mask=self._causal_mask(t, dec_in.device),
             tgt_key_padding_mask=tgt_pad,
             memory_key_padding_mask=mem_pad,
         )
+
+    def _codebook_logits(self, h: torch.Tensor, codes: torch.Tensor) -> torch.Tensor:
         h = self.out_norm(h)
         cond = h
         logits = []
@@ -163,7 +161,57 @@ class AutoregressiveSpeechHead(nn.Module):
             logits.append(self.cb_heads[k](cond))
             if k < self.num_codebooks - 1:
                 cond = cond + self.code_embed[k](codes[:, k, :])
-        return torch.stack(logits, dim=2)  # (B, T, K, V)
+        return torch.stack(logits, dim=2)
+
+    def forward(
+        self,
+        memory: torch.Tensor,
+        memory_mask: torch.Tensor,
+        codes: torch.Tensor,
+        frame_mask: torch.Tensor,
+        sampling_prob: float = 0.0,
+    ) -> torch.Tensor:
+        """Teacher-forced logits (B, T, K, V). ``codes`` is (B, K, T)."""
+        mem = self.memory_proj(memory)
+        mem_pad = memory_mask == 0
+        b, _k, t = codes.shape
+        cond_codes = codes
+
+        if sampling_prob > 0 and self.training and t > 1:
+            dec_in_tf = self._frame_inputs(codes)
+            h_tf = self._run_decoder(dec_in_tf, mem, mem_pad, frame_mask)
+            pred = self._codebook_logits(h_tf, codes).argmax(dim=-1).permute(0, 2, 1)
+            use_pred = torch.rand(b, t - 1, 1, device=codes.device) < sampling_prob
+            use_pred = use_pred.transpose(1, 2).expand(-1, _k, -1)
+            cond_codes = codes.clone()
+            cond_codes[:, :, : t - 1] = torch.where(
+                use_pred, pred[:, :, : t - 1], codes[:, :, : t - 1]
+            )
+
+        dec_in = self._frame_inputs(cond_codes)
+        h = self._run_decoder(dec_in, mem, mem_pad, frame_mask)
+        return self._codebook_logits(h, codes)
+
+    @staticmethod
+    def _sample_from_logits(
+        logits: torch.Tensor,
+        temperature: float,
+        top_p: float,
+    ) -> torch.LongTensor:
+        if temperature <= 0:
+            return logits.argmax(dim=-1)
+        scaled = logits / max(temperature, 1e-5)
+        probs = F.softmax(scaled, dim=-1)
+        if top_p < 1.0:
+            sorted_probs, sorted_idx = torch.sort(probs, descending=True, dim=-1)
+            cum = torch.cumsum(sorted_probs, dim=-1)
+            keep = cum <= top_p
+            keep[..., 0] = True
+            filtered = sorted_probs * keep
+            filtered = filtered / filtered.sum(dim=-1, keepdim=True).clamp(min=1e-12)
+            pick = torch.multinomial(filtered, num_samples=1).squeeze(-1)
+            return sorted_idx.gather(-1, pick.unsqueeze(-1)).squeeze(-1)
+        return torch.multinomial(probs, num_samples=1).squeeze(-1)
 
     @torch.inference_mode()
     def generate(
@@ -175,6 +223,8 @@ class AutoregressiveSpeechHead(nn.Module):
         early_stop: bool = True,
         min_frames: int = 20,
         patience: int = 4,
+        temperature: float = 0.0,
+        top_p: float = 1.0,
     ) -> torch.LongTensor:
         """Autoregressively sample codes (B, K, T) frame-by-frame, codebook-by-codebook."""
         mem = self.memory_proj(memory)
@@ -206,7 +256,7 @@ class AutoregressiveSpeechHead(nn.Module):
             cond = h_t
             frame_codes = []
             for k in range(self.num_codebooks):
-                tok = self.cb_heads[k](cond).argmax(dim=-1)
+                tok = self._sample_from_logits(self.cb_heads[k](cond), temperature, top_p)
                 frame_codes.append(tok)
                 cond = cond + self.code_embed[k](tok)
             prev_codes = torch.stack(frame_codes, dim=1)  # (B, K)
@@ -245,16 +295,23 @@ def speech_token_loss(
     logits: torch.Tensor,
     targets: torch.Tensor,
     frame_mask: torch.Tensor,
+    codebook_weights: list[float] | None = None,
 ) -> torch.Tensor:
     """Cross-entropy over codebooks and frames; targets (B, K, T)."""
     b, t, k, v = logits.shape
-    logits_flat = logits.permute(0, 2, 1, 3).reshape(b * k * t, v)
-    targets_flat = targets.permute(0, 1, 2).reshape(b * k * t)
-    mask_flat = frame_mask.unsqueeze(1).expand(b, k, t).reshape(b * k * t)
-    if mask_flat.sum() == 0:
-        return logits.sum() * 0.0
-    loss = F.cross_entropy(logits_flat, targets_flat, reduction="none")
-    return (loss * mask_flat).sum() / mask_flat.sum()
+    if codebook_weights is None:
+        codebook_weights = [2.0 ** (k - 1 - i) for i in range(k)]
+    total_w = sum(codebook_weights)
+    loss_sum = logits.new_zeros(())
+    for ki in range(k):
+        logits_k = logits[:, :, ki, :].reshape(b * t, v)
+        targets_k = targets[:, ki, :].reshape(b * t)
+        mask_k = frame_mask.reshape(b * t)
+        if mask_k.sum() == 0:
+            continue
+        ce = F.cross_entropy(logits_k, targets_k, reduction="none")
+        loss_sum = loss_sum + codebook_weights[ki] * (ce * mask_k).sum() / mask_k.sum()
+    return loss_sum / max(total_w, 1e-8)
 
 
 def estimate_speech_frames(text: str, config: SpeechTrainConfig) -> int:
@@ -501,6 +558,31 @@ class GemmaSpeechModel(nn.Module):
             self.codec.freeze()
 
         self._generation_log_entries: list[dict[str, Any]] = []
+        self._global_step: int = 0
+
+    def set_global_step(self, step: int) -> None:
+        self._global_step = int(step)
+
+    def scheduled_sampling_prob(self) -> float:
+        cfg = self.config
+        if not cfg.scheduled_sampling_enabled or self.head_type != "autoregressive":
+            return 0.0
+        ramp = max(1, cfg.scheduled_sampling_ramp_steps)
+        t = min(1.0, self._global_step / ramp)
+        return t * cfg.scheduled_sampling_max_prob
+
+    def _speech_loss(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        frame_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        return speech_token_loss(
+            logits,
+            targets,
+            frame_mask,
+            codebook_weights=self.config.codebook_loss_weights,
+        )
 
     @classmethod
     def load_trainable_checkpoint(cls, model: "GemmaSpeechModel", path: str | Path) -> int:
@@ -757,12 +839,15 @@ class GemmaSpeechModel(nn.Module):
             answer_start = min(prompt_len, full_len - 1)
             mem = mixed[:, answer_start:, :]
             mem_mask = full_mask[:, answer_start:]
-            logits = self.speech_head(mem, mem_mask, speech_token_ids, speech_frame_mask)
+            logits = self.speech_head(
+                mem, mem_mask, speech_token_ids, speech_frame_mask,
+                sampling_prob=self.scheduled_sampling_prob(),
+            )
         else:
             answer_start = min(prompt_len, full_len - 1)
             pooled = _mean_answer_pool(mixed, answer_start, full_mask)
             logits = self.speech_head(pooled, num_frames=speech_token_ids.shape[-1])
-        loss = speech_token_loss(logits, speech_token_ids, speech_frame_mask)
+        loss = self._speech_loss(logits, speech_token_ids, speech_frame_mask)
         return {"loss": loss, "logits": logits}
 
     def forward(
@@ -797,11 +882,17 @@ class GemmaSpeechModel(nn.Module):
         hidden_states = self._gemma_forward_hidden(input_ids, attention_mask)
         mixed = self.layer_mix(hidden_states)
         if self.head_type == "autoregressive":
-            logits = self.speech_head(mixed, attention_mask, speech_token_ids, speech_frame_mask)
+            logits = self.speech_head(
+                mixed,
+                attention_mask,
+                speech_token_ids,
+                speech_frame_mask,
+                sampling_prob=self.scheduled_sampling_prob(),
+            )
         else:
             pooled = _last_token_states(mixed, attention_mask)
             logits = self.speech_head(pooled, num_frames=speech_token_ids.shape[-1])
-        loss = speech_token_loss(logits, speech_token_ids, speech_frame_mask)
+        loss = self._speech_loss(logits, speech_token_ids, speech_frame_mask)
         return {"loss": loss, "logits": logits}
 
     @torch.inference_mode()
@@ -822,6 +913,8 @@ class GemmaSpeechModel(nn.Module):
                 early_stop=self.config.synth_early_stop,
                 min_frames=self.config.synth_min_frames,
                 patience=self.config.synth_early_stop_patience,
+                temperature=self.config.synth_temperature,
+                top_p=self.config.synth_top_p,
             )
         pooled = _last_token_states(mixed, attention_mask)
         logits = self.speech_head(pooled, num_frames=num_frames)

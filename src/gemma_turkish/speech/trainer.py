@@ -12,6 +12,15 @@ if TYPE_CHECKING:
     from gemma_turkish.speech.model import GemmaSpeechModel
 
 
+class ScheduledSamplingCallback(TrainerCallback):
+    """Feed global step to the model for scheduled sampling probability."""
+
+    def on_step_begin(self, args, state, control, **kwargs) -> None:
+        model = kwargs.get("model")
+        if model is not None and hasattr(model, "set_global_step"):
+            model.set_global_step(int(state.global_step))
+
+
 class EvalAudioCallback(TrainerCallback):
     """After each eval, synthesize a few fixed eval texts to WAV for listening."""
 
@@ -159,6 +168,7 @@ def build_trainer(
         learning_rate=config.learning_rate,
         weight_decay=config.weight_decay,
         warmup_ratio=config.warmup_ratio,
+        lr_scheduler_type=config.lr_scheduler_type,
         max_steps=config.max_steps,
         logging_steps=config.logging_steps,
         eval_strategy=eval_strategy,
@@ -175,7 +185,7 @@ def build_trainer(
         seed=config.seed,
     )
 
-    callbacks = []
+    callbacks = [ScheduledSamplingCallback()]
     if not smoke and config.eval_audio_samples > 0 and eval_audio_samples:
         callbacks.append(EvalAudioCallback(config, eval_audio_samples))
 

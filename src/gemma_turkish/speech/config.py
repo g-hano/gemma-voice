@@ -38,6 +38,14 @@ class SpeechTrainConfig:
     speech_decoder_ffn_dim: int = 4096
     speech_decoder_dropout: float = 0.1
 
+    # --- Scheduled sampling (reduce exposure bias at inference) ---
+    scheduled_sampling_enabled: bool = True
+    scheduled_sampling_max_prob: float = 0.5  # max fraction of frames using model preds as input
+    scheduled_sampling_ramp_steps: int = 8000  # linear ramp 0 → max_prob over this many steps
+
+    # --- RVQ codebook loss weights (coarse codebooks matter more for intelligibility) ---
+    codebook_loss_weights: list[float] | None = None  # default: geometric decay in speech_token_loss
+
     # --- Turkish text conditioning (blog EN: Say this naturally as speech:\n{text}) ---
     text_prompt_template: str = "Bunu doğal bir konuşma gibi söyle:\n{text}"
     max_text_length: int = 512
@@ -84,13 +92,14 @@ class SpeechTrainConfig:
 
     # --- Optimization ---
     output_dir: str = "outputs/speech_head"
-    learning_rate: float = 3e-4
+    learning_rate: float = 2e-4
     weight_decay: float = 0.01
-    warmup_ratio: float = 0.05
+    warmup_ratio: float = 0.03
+    lr_scheduler_type: str = "cosine"  # cosine | linear | constant
     per_device_train_batch_size: int = 1
     per_device_eval_batch_size: int = 1
     gradient_accumulation_steps: int = 8
-    max_steps: int = 4500
+    max_steps: int = 12000
     logging_steps: int = 10
     eval_steps: int = 50
     save_steps: int = 100
@@ -108,6 +117,8 @@ class SpeechTrainConfig:
     synth_early_stop: bool = True  # stop AR decode when coarse codebook plateaus (silence tail)
     synth_early_stop_patience: int = 4
     synth_min_frames: int = 20
+    synth_temperature: float = 0.85
+    synth_top_p: float = 0.92
     eval_audio_dir: str | None = None  # default: {output_dir}/eval_audio
 
     # Resume HF Trainer state + speech_head.pt from a checkpoint folder.
