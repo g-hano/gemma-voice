@@ -1,0 +1,7 @@
+{
+  "repo_id": "Chan-Y/gemma-turkish-speech-e2b-mimi",
+  "global_step": 12000,
+  "base_model": "google/gemma-4-E2B-it",
+  "codec": "kyutai/mimi",
+  "head_type": "autoregressive"
+}
