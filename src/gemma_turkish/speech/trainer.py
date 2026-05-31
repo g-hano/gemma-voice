@@ -115,9 +115,12 @@ def build_trainer(
             if model is None:
                 model = self.model
             ckpt = Path(resume_from_checkpoint)
-            if (ckpt / "speech_head.pt").is_file():
+            pt = ckpt / "speech_head.pt"
+            if pt.is_file():
                 step = _GemmaSpeechModel.load_trainable_checkpoint(model, ckpt)
                 print(f"Loaded speech_head weights from {ckpt} (was at step {step})")
+                # HF Trainer expects pytorch_model.bin; we only save speech_head.pt.
+                return
             return super()._load_from_checkpoint(resume_from_checkpoint, model)
 
     full = load_turkish_speech_dataset(config)
@@ -125,13 +128,6 @@ def build_trainer(
 
     if config.max_eval_samples is not None and len(eval_ds) > config.max_eval_samples:
         eval_ds = eval_ds.select(range(config.max_eval_samples))
-
-    eval_audio_samples = []
-    for i in range(min(config.eval_audio_samples, len(eval_set))):
-        item = eval_set[i]
-        eval_audio_samples.append(
-            {"text": item["text"], "num_frames": int(item["num_frames"])}
-        )
 
     encode_fn = (
         None
@@ -144,6 +140,14 @@ def build_trainer(
     eval_set = TurkishSpeechDataset(
         eval_ds, encode_fn, model.codec, config, split_label="eval"
     )
+
+    eval_audio_samples = []
+    for i in range(min(config.eval_audio_samples, len(eval_set))):
+        item = eval_set[i]
+        eval_audio_samples.append(
+            {"text": item["text"], "num_frames": int(item["num_frames"])}
+        )
+
     trainable = [p for p in model.parameters() if p.requires_grad]
     eval_strategy = "no" if smoke else "steps"
     save_strategy = "no" if smoke else "steps"

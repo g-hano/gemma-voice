@@ -131,6 +131,12 @@ def main() -> None:
     )
     if cfg.resume_from_checkpoint:
         print(f"Resume: {cfg.resume_from_checkpoint} → max_steps={cfg.max_steps}")
+        resume_dir = Path(cfg.resume_from_checkpoint)
+        for name in ("speech_head.pt", "trainer_state.json"):
+            if not (resume_dir / name).is_file():
+                raise FileNotFoundError(
+                    f"Resume checkpoint missing {name}: {resume_dir}"
+                )
 
     model = GemmaSpeechModel(cfg)
     trainer = build_trainer(model, cfg, smoke=args.smoke)
