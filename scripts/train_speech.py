@@ -52,6 +52,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=f"Use public {_DEV_PUBLIC_BACKBONE} instead of gated Gemma (demo wiring only)",
     )
+    p.add_argument(
+        "--resume-from-checkpoint",
+        type=str,
+        default=None,
+        help="HF checkpoint folder to resume (e.g. outputs/speech_head/checkpoint-4500)",
+    )
     return p.parse_args()
 
 def main() -> None:
@@ -77,6 +83,8 @@ def main() -> None:
         overrides["gemma_model_id"] = _DEV_PUBLIC_BACKBONE
         overrides["head_hidden_dim"] = 896
         overrides["gradient_checkpointing"] = False
+    if args.resume_from_checkpoint:
+        overrides["resume_from_checkpoint"] = args.resume_from_checkpoint
 
     cfg = load_config(args.config, overrides=overrides or None, project_root=ROOT)
 
@@ -121,10 +129,12 @@ def main() -> None:
         f"Gemma: {cfg.gemma_model_id} | head: {cfg.head_type} | mode: {cfg.training_mode} | "
         f"Mimi: {cfg.mimi_model_id} | out: {cfg.output_dir}"
     )
+    if cfg.resume_from_checkpoint:
+        print(f"Resume: {cfg.resume_from_checkpoint} → max_steps={cfg.max_steps}")
 
     model = GemmaSpeechModel(cfg)
     trainer = build_trainer(model, cfg, smoke=args.smoke)
-    trainer.train()
+    trainer.train(resume_from_checkpoint=cfg.resume_from_checkpoint)
     out = Path(cfg.output_dir)
     out.mkdir(parents=True, exist_ok=True)
     torch.save(

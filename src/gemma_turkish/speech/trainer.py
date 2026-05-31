@@ -15,13 +15,13 @@ if TYPE_CHECKING:
 class EvalAudioCallback(TrainerCallback):
     """After each eval, synthesize a few fixed eval texts to WAV for listening."""
 
-    def __init__(self, config: SpeechTrainConfig, texts: list[str]) -> None:
+    def __init__(self, config: SpeechTrainConfig, samples: list[dict[str, Any]]) -> None:
         self.config = config
-        self.texts = texts
+        self.samples = samples
 
     def on_evaluate(self, args, state, control, **kwargs) -> None:
         model = kwargs.get("model")
-        if model is None or not self.texts:
+        if model is None or not self.samples:
             return
         import soundfile as sf
 
@@ -32,15 +32,27 @@ class EvalAudioCallback(TrainerCallback):
         was_training = model.training
         model.eval()
         try:
-            for i, text in enumerate(self.texts[: self.config.eval_audio_samples]):
+            for i, sample in enumerate(self.samples[: self.config.eval_audio_samples]):
+                text = str(sample["text"])
+                ref_frames = sample.get("num_frames")
+                if ref_frames is not None:
+                    n = min(
+                        int(ref_frames) + self.config.eval_audio_frame_margin,
+                        self.config.eval_audio_max_frames,
+                    )
+                else:
+                    n = None
                 try:
-                    wave = model.synthesize(text, num_frames=self.config.eval_audio_max_frames)
+                    wave = model.synthesize(text, num_frames=n)
                     audio = wave.squeeze().numpy()
+                    dur = len(audio) / sr
                     path = out_dir / f"step{step:06d}_sample{i}.wav"
                     sf.write(str(path), audio, sr)
+                    meta = f"{text}\n\nframes={n or 'auto'} duration={dur:.2f}s"
                     (out_dir / f"step{step:06d}_sample{i}.txt").write_text(
-                        text, encoding="utf-8"
+                        meta, encoding="utf-8"
                     )
+                    print(f"[eval-audio] step {step} sample {i}: {dur:.2f}s ({n or 'auto'} frames)")
                 except Exception as exc:  # keep training alive on synth errors
                     print(f"[eval-audio] sample {i} failed: {exc}")
         finally:
@@ -99,16 +111,27 @@ def build_trainer(
                 output_dir = self.args.output_dir
             self._save_speech_head(output_dir)
 
+        def _load_from_checkpoint(self, resume_from_checkpoint, model=None):
+            if model is None:
+                model = self.model
+            ckpt = Path(resume_from_checkpoint)
+            if (ckpt / "speech_head.pt").is_file():
+                step = _GemmaSpeechModel.load_trainable_checkpoint(model, ckpt)
+                print(f"Loaded speech_head weights from {ckpt} (was at step {step})")
+            return super()._load_from_checkpoint(resume_from_checkpoint, model)
+
     full = load_turkish_speech_dataset(config)
     train_ds, eval_ds = train_val_split(full, config.val_fraction, config.seed)
 
     if config.max_eval_samples is not None and len(eval_ds) > config.max_eval_samples:
         eval_ds = eval_ds.select(range(config.max_eval_samples))
 
-    eval_audio_texts = [
-        str(eval_ds[i][config.dataset_text_column])
-        for i in range(min(config.eval_audio_samples, len(eval_ds)))
-    ]
+    eval_audio_samples = []
+    for i in range(min(config.eval_audio_samples, len(eval_set))):
+        item = eval_set[i]
+        eval_audio_samples.append(
+            {"text": item["text"], "num_frames": int(item["num_frames"])}
+        )
 
     encode_fn = (
         None
@@ -149,8 +172,8 @@ def build_trainer(
     )
 
     callbacks = []
-    if not smoke and config.eval_audio_samples > 0 and eval_audio_texts:
-        callbacks.append(EvalAudioCallback(config, eval_audio_texts))
+    if not smoke and config.eval_audio_samples > 0 and eval_audio_samples:
+        callbacks.append(EvalAudioCallback(config, eval_audio_samples))
 
     return SpeechHeadTrainer(
         model=model,

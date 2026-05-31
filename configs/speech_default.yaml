@@ -56,13 +56,21 @@ learning_rate: 3.0e-4
 per_device_train_batch_size: 1
 gradient_accumulation_steps: 8
 # ~3 epochs at ~13k rows, grad_accum 8 (train ~11.7k / 8 ≈ 1460 steps/epoch)
-max_steps: 4500
+# Continue from checkpoint-4500 for ~3 more epochs (4500 → 9000).
+max_steps: 9000
+resume_from_checkpoint: outputs/speech_head/checkpoint-4500
 # Eval is much cheaper now (subset + no per-step generation), so we can eval less often.
 eval_steps: 500
 save_steps: 500
 logging_steps: 10
-# Synthesize this many eval texts to WAV after each eval (outputs/speech_head/eval_audio/).
+# Synthesize eval texts to WAV. Length = reference audio frames (+margin), NOT fixed 150 (=12 s).
 eval_audio_samples: 2
 eval_audio_max_frames: 150
+eval_audio_frame_margin: 5
+eval_audio_trim_silence: true
+synth_chars_per_second: 14.0
+synth_early_stop: true
+synth_early_stop_patience: 4
+synth_min_frames: 20
 bf16: true
 report_to: none

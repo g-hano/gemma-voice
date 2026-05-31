@@ -171,6 +171,10 @@ class AutoregressiveSpeechHead(nn.Module):
         memory: torch.Tensor,
         memory_mask: torch.Tensor,
         num_frames: int,
+        *,
+        early_stop: bool = True,
+        min_frames: int = 20,
+        patience: int = 4,
     ) -> torch.LongTensor:
         """Autoregressively sample codes (B, K, T) frame-by-frame, codebook-by-codebook."""
         mem = self.memory_proj(memory)
@@ -181,6 +185,8 @@ class AutoregressiveSpeechHead(nn.Module):
         inputs_emb: list[torch.Tensor] = []
         generated: list[torch.Tensor] = []
         prev_codes: torch.Tensor | None = None
+        stable_run = 0
+        prev_cb0: torch.Tensor | None = None
         for t in range(num_frames):
             if t == 0:
                 step_in = self.bos.to(mem.dtype).unsqueeze(0).expand(b, -1)
@@ -205,6 +211,15 @@ class AutoregressiveSpeechHead(nn.Module):
                 cond = cond + self.code_embed[k](tok)
             prev_codes = torch.stack(frame_codes, dim=1)  # (B, K)
             generated.append(prev_codes)
+            if early_stop:
+                cb0 = frame_codes[0]
+                if prev_cb0 is not None and torch.equal(cb0, prev_cb0):
+                    stable_run += 1
+                else:
+                    stable_run = 0
+                prev_cb0 = cb0
+                if t + 1 >= min_frames and stable_run >= patience:
+                    break
         return torch.stack(generated, dim=2).long()  # (B, K, T)
 
 
@@ -240,6 +255,45 @@ def speech_token_loss(
         return logits.sum() * 0.0
     loss = F.cross_entropy(logits_flat, targets_flat, reduction="none")
     return (loss * mask_flat).sum() / mask_flat.sum()
+
+
+def estimate_speech_frames(text: str, config: SpeechTrainConfig) -> int:
+    """Heuristic frame count from text length (12.5 Hz Mimi frames)."""
+    cps = max(config.synth_chars_per_second, 1.0)
+    duration_sec = len(text.strip()) / cps
+    frames = int(duration_sec * 12.5) + config.eval_audio_frame_margin
+    return max(25, min(frames, config.eval_audio_max_frames))
+
+
+def trim_trailing_silence(
+    wave: torch.Tensor,
+    sample_rate: int,
+    *,
+    threshold: float = 0.015,
+    window_ms: int = 40,
+    pad_ms: int = 80,
+) -> torch.Tensor:
+    """Drop low-energy tail after speech (fixes long post-speech silence in eval WAVs)."""
+    import numpy as np
+
+    x = wave.squeeze().detach().float().cpu().numpy()
+    if x.size == 0:
+        return wave.squeeze()
+    win = max(1, int(sample_rate * window_ms / 1000))
+    pad = int(sample_rate * pad_ms / 1000)
+    n_win = max(1, (x.size + win - 1) // win)
+    padded = np.pad(x, (0, n_win * win - x.size))
+    rms = np.sqrt(
+        np.maximum(
+            np.mean(padded.reshape(n_win, win) ** 2, axis=1),
+            1e-12,
+        )
+    )
+    active = np.where(rms > threshold)[0]
+    if active.size == 0:
+        return wave.squeeze()
+    end = min(x.size, (int(active[-1]) + 1) * win + pad)
+    return torch.from_numpy(x[:end])
 
 
 def _resolve_dtype(name: str) -> torch.dtype:
@@ -447,6 +501,22 @@ class GemmaSpeechModel(nn.Module):
             self.codec.freeze()
 
         self._generation_log_entries: list[dict[str, Any]] = []
+
+    @classmethod
+    def load_trainable_checkpoint(cls, model: "GemmaSpeechModel", path: str | Path) -> int:
+        """Load layer_mix + speech_head weights; returns global_step if trainer_state exists."""
+        ckpt_dir = Path(path)
+        pt = ckpt_dir / "speech_head.pt" if ckpt_dir.is_dir() else ckpt_dir
+        if not pt.is_file():
+            raise FileNotFoundError(f"No speech_head.pt at {pt}")
+        state = torch.load(pt, map_location="cpu", weights_only=True)
+        model.layer_mix.load_state_dict(state["layer_mix"])
+        model.speech_head.load_state_dict(state["speech_head"])
+        trainer_state = ckpt_dir / "trainer_state.json" if ckpt_dir.is_dir() else None
+        step = 0
+        if trainer_state is not None and trainer_state.is_file():
+            step = int(json.loads(trainer_state.read_text(encoding="utf-8")).get("global_step", 0))
+        return step
 
     def _decode_generated_answers(
         self,
@@ -745,13 +815,26 @@ class GemmaSpeechModel(nn.Module):
         hidden_states = self._gemma_forward_hidden(input_ids, attention_mask)
         mixed = self.layer_mix(hidden_states)
         if self.head_type == "autoregressive":
-            return self.speech_head.generate(mixed, attention_mask, num_frames)
+            return self.speech_head.generate(
+                mixed,
+                attention_mask,
+                num_frames,
+                early_stop=self.config.synth_early_stop,
+                min_frames=self.config.synth_min_frames,
+                patience=self.config.synth_early_stop_patience,
+            )
         pooled = _last_token_states(mixed, attention_mask)
         logits = self.speech_head(pooled, num_frames=num_frames)
         return logits.argmax(dim=-1).permute(0, 2, 1)  # (B, K, T)
 
     @torch.inference_mode()
-    def synthesize(self, text: str, num_frames: int | None = None) -> torch.Tensor:
+    def synthesize(
+        self,
+        text: str,
+        num_frames: int | None = None,
+        *,
+        trim_silence: bool | None = None,
+    ) -> torch.Tensor:
         """Text → predicted Mimi codes → waveform (1, samples). Conditions on the transcript."""
         self.eval()
         device = next(self.speech_head.parameters()).device
@@ -763,8 +846,14 @@ class GemmaSpeechModel(nn.Module):
         )
         input_ids = _ensure_batched_2d(padded["input_ids"], "input_ids").to(device)
         attention_mask = _ensure_batched_2d(padded["attention_mask"], "attention_mask").to(device)
-        n = num_frames or self.config.eval_audio_max_frames
+        n = num_frames or estimate_speech_frames(text, self.config)
         codes = self.predict_speech_tokens(input_ids, attention_mask, n)
         codes = codes.to(next(self.codec.parameters()).device)
         waveform = self.codec.decode_codes(codes)  # (B, 1, samples)
-        return waveform[0].detach().float().cpu()
+        wave = waveform[0].detach().float().cpu()
+        do_trim = (
+            self.config.eval_audio_trim_silence if trim_silence is None else trim_silence
+        )
+        if do_trim:
+            wave = trim_trailing_silence(wave, self.config.mimi_sample_rate)
+        return wave

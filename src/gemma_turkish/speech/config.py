@@ -101,8 +101,17 @@ class SpeechTrainConfig:
 
     # --- Eval audio synthesis (decode a sample to WAV after every eval) ---
     eval_audio_samples: int = 1  # how many eval texts to synthesize each eval
-    eval_audio_max_frames: int = 150  # cap generated frames (12.5 Hz → ~12 s) to keep it fast
+    eval_audio_max_frames: int = 150  # upper cap only (150 @ 12.5 Hz = 12 s); not the default length
+    eval_audio_frame_margin: int = 5  # extra frames beyond reference length at eval
+    eval_audio_trim_silence: bool = True
+    synth_chars_per_second: float = 14.0  # heuristic duration when no reference frames
+    synth_early_stop: bool = True  # stop AR decode when coarse codebook plateaus (silence tail)
+    synth_early_stop_patience: int = 4
+    synth_min_frames: int = 20
     eval_audio_dir: str | None = None  # default: {output_dir}/eval_audio
+
+    # Resume HF Trainer state + speech_head.pt from a checkpoint folder.
+    resume_from_checkpoint: str | None = None
 
     # --- Extra ---
     report_to: str = "none"  # none | tensorboard | wandb
@@ -127,6 +136,9 @@ class SpeechTrainConfig:
                 self.generated_log_path = str((root / log_p).resolve())
             else:
                 self.generated_log_path = str(log_p.resolve())
+        if self.resume_from_checkpoint:
+            rp = Path(self.resume_from_checkpoint)
+            self.resume_from_checkpoint = str((rp if rp.is_absolute() else root / rp).resolve())
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
