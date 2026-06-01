@@ -48,8 +48,8 @@ Gemma 4 (~16 GB) ve Mimi **gated / upstream** modeller. Hepsini bu repoya kopyal
 ## Kurulum
 
 ```powershell
-git clone https://github.com/g-hano/gemma.git
-cd gemma
+git clone https://github.com/g-hano/gemma-voice.git
+cd gemma-voice
 uv venv --python 3.12 .venv
 .\.venv\Scripts\Activate.ps1
 uv pip install -e .
