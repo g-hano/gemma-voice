@@ -67,6 +67,7 @@ Gemma 4 model erişimi için [google/gemma-4-E2B-it](https://huggingface.co/goog
 Repo içindeki `scripts/inference.py` varsayılan olarak `outputs/speech_head_v2/checkpoint-12000` yükler:
 
 ```powershell
+cd src
 # Tek cümle → outputs/inference/<timestamp>.wav
 python scripts/inference.py -t "Merhaba, bu bir Türkçe ses denemesidir."
 
