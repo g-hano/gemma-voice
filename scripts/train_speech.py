@@ -12,6 +12,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from gemma_turkish.speech.config import load_config  # noqa: E402
+from gemma_turkish.speech.data import (  # noqa: E402
+    load_turkish_speech_dataset,
+    log_train_val_split,
+    train_val_split,
+)
 from gemma_turkish.speech.model import GemmaSpeechModel  # noqa: E402
 from gemma_turkish.speech.trainer import build_trainer  # noqa: E402
 # Smaller backbone for local smoke without downloading E4B (~8B).
@@ -41,6 +46,11 @@ def parse_args() -> argparse.Namespace:
         help="Load YAML + print summary; no model weights downloaded",
     )
     p.add_argument(
+        "--check-data",
+        action="store_true",
+        help="With --validate-only: download/load HF datasets and print row counts",
+    )
+    p.add_argument(
         "--training-mode",
         type=str,
         choices=("teacher_forced", "generated_answer"),
@@ -59,6 +69,14 @@ def parse_args() -> argparse.Namespace:
         help="HF checkpoint folder to resume (e.g. outputs/speech_head/checkpoint-4500)",
     )
     return p.parse_args()
+
+
+def _print_dataset_summary(cfg) -> None:
+    print("Loading speech datasets (may download on first run)...")
+    merged = load_turkish_speech_dataset(cfg)
+    train_ds, val_ds = train_val_split(merged, cfg.val_fraction, cfg.seed)
+    log_train_val_split(train_ds, val_ds, cfg)
+
 
 def main() -> None:
     args = parse_args()
@@ -92,6 +110,8 @@ def main() -> None:
         print("Config OK:")
         for k, v in sorted(cfg.to_dict().items()):
             print(f"  {k}: {v}")
+        if args.check_data:
+            _print_dataset_summary(cfg)
         return
 
     if args.smoke:
@@ -129,6 +149,14 @@ def main() -> None:
         f"Gemma: {cfg.gemma_model_id} | head: {cfg.head_type} | mode: {cfg.training_mode} | "
         f"Mimi: {cfg.mimi_model_id} | out: {cfg.output_dir}"
     )
+
+    train_hf = eval_hf = None
+    if not cfg.use_demo_dataset and not args.smoke:
+        train_hf, eval_hf = train_val_split(
+            load_turkish_speech_dataset(cfg), cfg.val_fraction, cfg.seed
+        )
+        log_train_val_split(train_hf, eval_hf, cfg)
+
     if cfg.resume_from_checkpoint:
         print(f"Resume: {cfg.resume_from_checkpoint} → max_steps={cfg.max_steps}")
         resume_dir = Path(cfg.resume_from_checkpoint)
@@ -139,7 +167,9 @@ def main() -> None:
                 )
 
     model = GemmaSpeechModel(cfg)
-    trainer = build_trainer(model, cfg, smoke=args.smoke)
+    trainer = build_trainer(
+        model, cfg, smoke=args.smoke, train_hf=train_hf, eval_hf=eval_hf
+    )
     trainer.train(resume_from_checkpoint=cfg.resume_from_checkpoint)
     out = Path(cfg.output_dir)
     out.mkdir(parents=True, exist_ok=True)

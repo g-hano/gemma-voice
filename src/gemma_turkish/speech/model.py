@@ -370,6 +370,16 @@ def _text_hidden_size(gemma: nn.Module) -> int:
     return int(cfg.hidden_size)
 
 
+def _gemma_feature_cache_root(base_dir: str | Path, model_id: str) -> Path:
+    """Per-backbone cache dir so token-id keys do not collide across models."""
+    slug = model_id.replace("/", "__").replace("\\", "__")
+    if len(slug) > 120:
+        slug = hashlib.sha1(model_id.encode("utf-8")).hexdigest()[:16]
+    root = Path(base_dir) / slug
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 def _is_gemma4_model_id(model_id: str) -> bool:
     mid = model_id.lower()
     return "gemma-4" in mid or "gemma4" in mid
@@ -528,6 +538,7 @@ class GemmaSpeechModel(nn.Module):
         )
 
         hidden_dim = _text_hidden_size(self.gemma)
+        self._gemma_hidden_dim = hidden_dim
 
         self.layer_mix = LastLayerMix(config.num_tap_layers)
         self.head_type = getattr(config, "head_type", "autoregressive")
@@ -725,8 +736,10 @@ class GemmaSpeechModel(nn.Module):
         real = input_ids[0][attention_mask[0].bool()].tolist()
         key = f"{self.config.num_tap_layers}_" + ",".join(map(str, real))
         digest = hashlib.sha1(key.encode("utf-8")).hexdigest()
-        root = Path(self.config.gemma_feature_cache_dir)
-        root.mkdir(parents=True, exist_ok=True)
+        root = _gemma_feature_cache_root(
+            self.config.gemma_feature_cache_dir,
+            self.config.gemma_model_id,
+        )
         return root / f"{digest}.pt"
 
     def _gemma_forward_hidden(
@@ -739,7 +752,12 @@ class GemmaSpeechModel(nn.Module):
             device = next(self.layer_mix.parameters()).device
             dtype = _resolve_dtype(self.config.gemma_dtype)
             cached = torch.load(cache_path, weights_only=True)
-            return tuple(t.to(device=device, dtype=dtype) for t in cached["last_states"])
+            last_states = cached["last_states"]
+            if (
+                last_states
+                and int(last_states[0].shape[-1]) == self._gemma_hidden_dim
+            ):
+                return tuple(t.to(device=device, dtype=dtype) for t in last_states)
 
         outputs = self.gemma(
             input_ids=input_ids,

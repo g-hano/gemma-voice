@@ -51,8 +51,8 @@ Gemma 4 uses `AutoProcessor.apply_chat_template(..., enable_thinking=False)` for
 
 | Role | HF path | Config keys | Columns used | Loader filters |
 |------|---------|-------------|--------------|----------------|
-| **Speech head (default)** | [Anilosan15/Synthetic_Turkish_TTS_Data](https://huggingface.co/datasets/Anilosan15/Synthetic_Turkish_TTS_Data) | `dataset_split: train` | `text` → transcript, `audio` → waveform | CC BY 4.0; ~13k clips; resample 24 kHz. Default `max_samples: null` uses the full split; set e.g. `max_samples: 512` for fast debug. Optional `filter_dataset: true` drops rows by text/audio length (not language). |
-| **Alternative** | [erenfazlioglu/turkishvoicedataset](https://huggingface.co/datasets/erenfazlioglu/turkishvoicedataset) | — | `transcription` → text, `audio` → waveform | Set `dataset_text_column: transcription` |
+| **Speech head (default)** | [Anilosan15/Synthetic_Turkish_TTS_Data](https://huggingface.co/datasets/Anilosan15/Synthetic_Turkish_TTS_Data) + [ysdede/khanacademy-turkish](https://huggingface.co/datasets/ysdede/khanacademy-turkish) | primary + `extra_datasets` | Synthetic: `text`, `audio`. Khan: `transcription` → `text`, `audio` | Default config merges both **train** splits (~13k + ~26k). Khan also has a **test** split (~1.3k); we still hold out `val_fraction` from the merged train pool unless you customize loading. Resample 24 kHz. |
+| **Alternative** | [erenfazlioglu/turkishvoicedataset](https://huggingface.co/datasets/erenfazlioglu/turkishvoicedataset) | — | `transcription` → text, `audio` → waveform | Set `dataset_text_column: transcription` or add under `extra_datasets` |
 | **Smoke / offline** | `--demo` | synthetic | `question`, `text`, `audio` | 4 Turkish QA pairs + noise WAV |
 | **Text SFT (phase A)** | `tascib/turkish-instruction`, etc. | — | — | See [setup.md](setup.md); not used by speech script |
 
@@ -73,7 +73,13 @@ cd C:\Users\Cihan\Desktop\gemma
 # Config check (no weight download)
 python scripts/train_speech.py --config configs/speech_default.yaml --validate-only
 
-# Full run (backbone + Synthetic Turkish TTS)
+# Config only (no weights)
+python scripts/train_speech.py --config configs/speech_default.yaml --validate-only
+
+# Download/load HF data and print train/val counts (first run can take a while)
+python scripts/train_speech.py --config configs/speech_default.yaml --validate-only --check-data
+
+# Full run: Synthetic TTS + Khan Academy Turkish → outputs/speech_head_v3_synthetic_khan/
 python scripts/train_speech.py --config configs/speech_default.yaml
 
 # Small generated-answer run (demo QA, 20 steps; auto-fallback to gemma-2-2b-it on --demo)
@@ -89,7 +95,7 @@ python scripts/train_speech.py --demo --smoke --training-mode teacher_forced
 python scripts/train_speech.py --config configs/speech_default.yaml --demo --gemma_model_id google/gemma-4-E4B-it
 ```
 
-Checkpoints: `outputs/speech_head/` plus `speech_head.pt` (adapter weights only).
+Checkpoints: `outputs/speech_head_v3_synthetic_khan/checkpoint-*` plus final `speech_head.pt` (adapter only). Token/feature caches: `data/speech_token_cache/synthetic_khan`, `data/gemma_feature_cache/synthetic_khan`.
 
 ## Inference
 

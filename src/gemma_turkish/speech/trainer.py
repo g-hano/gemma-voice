@@ -6,7 +6,12 @@ import torch
 from transformers import TrainerCallback
 from gemma_turkish.speech.collator import SpeechCollator
 from gemma_turkish.speech.config import SpeechTrainConfig
-from gemma_turkish.speech.data import TurkishSpeechDataset, load_turkish_speech_dataset, train_val_split
+from gemma_turkish.speech.data import (
+    TurkishSpeechDataset,
+    load_turkish_speech_dataset,
+    log_train_val_split,
+    train_val_split,
+)
 
 if TYPE_CHECKING:
     from gemma_turkish.speech.model import GemmaSpeechModel
@@ -73,6 +78,8 @@ def build_trainer(
     config: SpeechTrainConfig,
     *,
     smoke: bool = False,
+    train_hf: Any | None = None,
+    eval_hf: Any | None = None,
 ) -> Any:
     """Build a HF ``Trainer`` (imported lazily for faster package import checks)."""
     from transformers import Trainer, TrainingArguments
@@ -132,8 +139,12 @@ def build_trainer(
                 return
             return super()._load_from_checkpoint(resume_from_checkpoint, model)
 
-    full = load_turkish_speech_dataset(config)
-    train_ds, eval_ds = train_val_split(full, config.val_fraction, config.seed)
+    if train_hf is None or eval_hf is None:
+        full = load_turkish_speech_dataset(config)
+        train_ds, eval_ds = train_val_split(full, config.val_fraction, config.seed)
+        log_train_val_split(train_ds, eval_ds, config)
+    else:
+        train_ds, eval_ds = train_hf, eval_hf
 
     if config.max_eval_samples is not None and len(eval_ds) > config.max_eval_samples:
         eval_ds = eval_ds.select(range(config.max_eval_samples))

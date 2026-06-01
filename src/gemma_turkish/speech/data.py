@@ -218,6 +218,81 @@ class TurkishSpeechDataset(TorchDataset):
         return out
 
 
+def _canonicalize_speech_columns(
+    ds: "Dataset",
+    text_column: str,
+    audio_column: str,
+    canonical_text: str,
+    canonical_audio: str,
+) -> "Dataset":
+    if text_column != canonical_text:
+        ds = ds.rename_column(text_column, canonical_text)
+    if audio_column != canonical_audio:
+        ds = ds.rename_column(audio_column, canonical_audio)
+    return ds
+
+
+def _load_hf_speech_split(
+    config: SpeechTrainConfig,
+    *,
+    dataset_name: str,
+    dataset_split: str,
+    text_column: str,
+    audio_column: str,
+    dataset_config: str | None = None,
+    max_samples: int | None = None,
+) -> "Dataset":
+    from datasets import Audio, load_dataset
+
+    load_kwargs: dict[str, Any] = {"split": dataset_split}
+    if dataset_config:
+        ds = load_dataset(dataset_name, dataset_config, **load_kwargs)
+    else:
+        ds = load_dataset(dataset_name, **load_kwargs)
+
+    n_raw = len(ds)
+
+    ds = ds.cast_column(
+        audio_column,
+        Audio(sampling_rate=config.mimi_sample_rate, decode=False),
+    )
+    ds = _canonicalize_speech_columns(
+        ds,
+        text_column,
+        audio_column,
+        config.dataset_text_column,
+        config.dataset_audio_column,
+    )
+
+    if config.filter_dataset:
+        ds = ds.filter(
+            _row_passes_filters,
+            fn_kwargs={"config": config},
+            desc=f"Filter {dataset_name} ({dataset_split})",
+        )
+        n_kept = len(ds)
+        dropped = n_raw - n_kept
+        print(
+            f"[speech-data] {dataset_name} ({dataset_split}): "
+            f"{n_raw} raw → {n_kept} kept ({dropped} filtered out)"
+        )
+    else:
+        print(f"[speech-data] {dataset_name} ({dataset_split}): {n_raw} rows (filter off)")
+
+    cap = max_samples if max_samples is not None else config.max_samples
+    if cap is not None and len(ds) > 0:
+        before_cap = len(ds)
+        ds = ds.select(range(min(cap, len(ds))))
+        if len(ds) < before_cap:
+            print(f"[speech-data] {dataset_name}: capped to {len(ds)} rows (max_samples={cap})")
+
+    if len(ds) == 0:
+        raise ValueError(
+            f"No samples loaded from {dataset_name!r} (split={dataset_split!r})."
+        )
+    return ds
+
+
 def build_demo_dataset(config: SpeechTrainConfig) -> "Dataset":
     """Tiny in-memory set: synthetic noise WAV + Turkish QA or repeat sentences."""
     from datasets import Dataset
@@ -247,42 +322,69 @@ def load_turkish_speech_dataset(config: SpeechTrainConfig) -> "Dataset":
     if config.use_demo_dataset:
         return build_demo_dataset(config)
 
-    from datasets import Audio, load_dataset
+    from datasets import concatenate_datasets
 
-    load_kwargs: dict[str, Any] = {"split": config.dataset_split}
-    if config.dataset_config:
-        ds = load_dataset(config.dataset_name, config.dataset_config, **load_kwargs)
-    else:
-        ds = load_dataset(config.dataset_name, **load_kwargs)
+    sources: list[tuple[str, str]] = [
+        (config.dataset_name, config.dataset_split),
+    ]
+    for spec in config.extra_datasets or []:
+        name = spec.get("dataset_name")
+        if not name:
+            raise ValueError("Each extra_datasets entry must include dataset_name")
+        sources.append((str(name), str(spec.get("dataset_split", "train"))))
 
-    # decode=False → {path, bytes}; we decode with soundfile (no torchcodec required).
-    ds = ds.cast_column(
-        config.dataset_audio_column,
-        Audio(sampling_rate=config.mimi_sample_rate, decode=False),
+    print(f"[speech-data] Loading {len(sources)} dataset(s): {', '.join(f'{n}({s})' for n, s in sources)}")
+
+    parts: list["Dataset"] = [
+        _load_hf_speech_split(
+            config,
+            dataset_name=config.dataset_name,
+            dataset_split=config.dataset_split,
+            text_column=config.dataset_text_column,
+            audio_column=config.dataset_audio_column,
+            dataset_config=config.dataset_config,
+        )
+    ]
+    for spec in config.extra_datasets or []:
+        name = spec.get("dataset_name")
+        if not name:
+            raise ValueError("Each extra_datasets entry must include dataset_name")
+        parts.append(
+            _load_hf_speech_split(
+                config,
+                dataset_name=str(name),
+                dataset_split=str(spec.get("dataset_split", "train")),
+                text_column=str(spec.get("dataset_text_column", config.dataset_text_column)),
+                audio_column=str(spec.get("dataset_audio_column", config.dataset_audio_column)),
+                dataset_config=spec.get("dataset_config"),
+                max_samples=spec.get("max_samples"),
+            )
+        )
+
+    if len(parts) == 1:
+        return parts[0]
+    merged = concatenate_datasets(parts)
+    if len(merged) == 0:
+        raise ValueError("Merged speech dataset is empty.")
+    breakdown = " + ".join(f"{sources[i][0]}:{len(parts[i])}" for i in range(len(parts)))
+    print(f"[speech-data] merged total: {len(merged)} rows ({breakdown})")
+    return merged
+
+
+def log_train_val_split(
+    train_ds: "Dataset", val_ds: "Dataset", config: SpeechTrainConfig
+) -> None:
+    eff = config.per_device_train_batch_size * config.gradient_accumulation_steps
+    steps_per_epoch = max(1, len(train_ds) // eff)
+    epochs = config.max_steps / steps_per_epoch
+    print(
+        f"[speech-data] train/val split ({config.val_fraction:.0%} val): "
+        f"train={len(train_ds)} val={len(val_ds)}"
     )
-
-    if config.filter_dataset:
-        ds = ds.filter(
-            _row_passes_filters,
-            fn_kwargs={"config": config},
-            desc="Filter speech rows (text length, audio duration)",
-        )
-
-    if config.max_samples is not None and len(ds) > 0:
-        n = min(config.max_samples, len(ds))
-        ds = ds.select(range(n))
-
-    if len(ds) == 0:
-        hint = (
-            " Enable filter_dataset: true only if you need to drop bad rows; "
-            "for curated sets leave it false."
-            if not config.filter_dataset
-            else " Try filter_dataset: false or check dataset_text_column / dataset_audio_column."
-        )
-        raise ValueError(
-            f"No samples loaded from {config.dataset_name!r} (split={config.dataset_split!r}).{hint}"
-        )
-    return ds
+    print(
+        f"[speech-data] ~{steps_per_epoch} steps/epoch (eff. batch {eff}), "
+        f"max_steps={config.max_steps} (~{epochs:.1f} epochs)"
+    )
 
 def train_val_split(
     dataset: "Dataset", val_fraction: float, seed: int

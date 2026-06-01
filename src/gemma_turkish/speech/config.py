@@ -70,6 +70,10 @@ class SpeechTrainConfig:
     dataset_split: str = "train"
     dataset_text_column: str = "text"
     dataset_audio_column: str = "audio"
+    # Additional HF sets merged after the primary (same canonical text/audio column names).
+    # Each entry: dataset_name, dataset_split, dataset_text_column, dataset_audio_column;
+    # optional dataset_config, max_samples.
+    extra_datasets: list[dict[str, Any]] | None = None
     max_samples: int | None = None  # None = use full dataset split
     val_fraction: float = 0.1
     max_eval_samples: int | None = 200  # cap eval set so eval stays cheap

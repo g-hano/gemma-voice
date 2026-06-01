@@ -62,11 +62,11 @@ class MimiSpeechCodec(nn.Module):
             sampling_rate=sr,
             return_tensors="pt",
         )
-        device = next(self.parameters()).device
-        input_values = inputs["input_values"].to(device)
+        # Frozen Mimi stays on CPU under HF Trainer; CUDA inputs + CPU weights break cdist.
+        if next(self.codec.parameters()).device.type != "cpu":
+            self.codec.cpu()
+        input_values = inputs["input_values"]
         padding_mask = inputs.get("padding_mask")
-        if padding_mask is not None:
-            padding_mask = padding_mask.to(device)
 
         encode_out = self.codec.encode(
             input_values,
@@ -84,6 +84,9 @@ class MimiSpeechCodec(nn.Module):
     @torch.inference_mode()
     def decode_codes(self, audio_codes: torch.LongTensor) -> torch.Tensor:
         """Codes (B, K, T) → waveform (B, 1, samples)."""
+        codec_device = next(self.codec.parameters()).device
+        if audio_codes.device != codec_device:
+            audio_codes = audio_codes.to(codec_device)
         out = self.codec.decode(audio_codes)
         if hasattr(out, "audio_values"):
             return out.audio_values
